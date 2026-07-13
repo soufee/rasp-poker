@@ -1,32 +1,44 @@
-import type { CardView, GameStateView, PlayerView } from '../protocol/types';
+import type { CardModel, GameStatePayload, PlayerState } from '../protocol/types';
 
 export interface DecisionContext {
-  state: GameStateView;
+  state: GameStatePayload;
   myId: string;
   myIndex: number;
-  me: PlayerView;
-  hand: Array<CardView | null>;
-  isMyTurn: boolean;
+  me: PlayerState;
 }
 
-export function buildContext(state: GameStateView, myId: string): DecisionContext | null {
-  const myIndex = state.players.findIndex((player) => player.id === myId);
+export function buildContext(state: GameStatePayload, myId: string): DecisionContext | null {
+  const myIndex = state.players.findIndex((p) => p.id === myId);
   if (myIndex < 0) {
     return null;
   }
-  const me = state.players[myIndex];
-  const isMyTurn = state.currentPlayerIndex === myIndex;
   return {
     state,
     myId,
     myIndex,
-    me,
-    hand: me.cards,
-    isMyTurn,
+    me: state.players[myIndex],
   };
 }
 
-/** Returns known cards (rank + suit) in a player hand, ignoring fog-of-war nulls. */
-export function knownHand(hand: Array<CardView | null>): CardView[] {
-  return hand.filter((card): card is CardView => card !== null);
+export function isMyTurn(ctx: DecisionContext): boolean {
+  return ctx.state.currentPlayerIndex === ctx.myIndex;
+}
+
+export function myVisibleCards(ctx: DecisionContext): Array<{ index: number; card: CardModel }> {
+  const out: Array<{ index: number; card: CardModel }> = [];
+  ctx.me.cards.forEach((card, index) => {
+    if (card) {
+      out.push({ index, card });
+    }
+  });
+  return out;
+}
+
+export function remainingTricks(ctx: DecisionContext): number {
+  return ctx.me.cards.length;
+}
+
+export function tricksNeeded(ctx: DecisionContext): number {
+  const bid = ctx.me.currentBid ?? 0;
+  return Math.max(0, bid - ctx.me.tricksTaken);
 }

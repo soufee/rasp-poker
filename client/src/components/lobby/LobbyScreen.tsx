@@ -1,7 +1,13 @@
 import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
-import { roomsApi } from '../../services/api';
-import type { RoomSummary, Session } from '../../types/game';
+import { botsApi, roomsApi } from '../../services/api';
+import type { BotStrength, BotSummary, RoomSummary, Session } from '../../types/game';
 import { Avatar, Button, Logo, Modal, Spinner, Toggle } from '../ui';
+
+const strengthLabels: Record<BotStrength, string> = {
+  basic: 'Новичок',
+  medium: 'Средний',
+  strong: 'Сильный',
+};
 
 type LobbyFilter = 'all' | 'waiting' | 'playing';
 
@@ -30,17 +36,75 @@ function CreateRoomModal({ onClose, onCreated, session }: CreateRoomModalProps) 
   const [hasLadder, setHasLadder] = useState(true);
   const [hasMiser, setHasMiser] = useState(true);
   const [isPrivate, setIsPrivate] = useState(false);
+  const [withBots, setWithBots] = useState(false);
+  const [botList, setBotList] = useState<BotSummary[]>([]);
+  const [selectedBots, setSelectedBots] = useState<string[]>([]);
+  const [botsLoading, setBotsLoading] = useState(false);
+  const [botsError, setBotsError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const botSeats = playersCount - 1;
+
+  useEffect(() => {
+    if (!withBots || botList.length > 0) {
+      return;
+    }
+    let cancelled = false;
+    setBotsLoading(true);
+    setBotsError(null);
+    void botsApi
+      .list(session.token)
+      .then((bots) => {
+        if (!cancelled) {
+          setBotList(bots);
+        }
+      })
+      .catch((caught: unknown) => {
+        if (!cancelled) {
+          setBotsError(caught instanceof Error ? caught.message : 'Не удалось загрузить ботов');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setBotsLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [withBots, botList.length, session.token]);
+
+  const toggleBot = (id: string) => {
+    setSelectedBots((current) => {
+      if (current.includes(id)) {
+        return current.filter((entry) => entry !== id);
+      }
+      if (current.length >= botSeats) {
+        return current;
+      }
+      return [...current, id];
+    });
+  };
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setIsSubmitting(true);
     setError(null);
 
+    let bots: string[] | undefined;
+    if (withBots) {
+      const chosen = selectedBots.slice(0, botSeats);
+      while (chosen.length < botSeats) {
+        chosen.push('random');
+      }
+      bots = chosen;
+    }
+
     try {
       const room = await roomsApi.create(
         {
+          bots,
           hasLadder,
           hasMiser,
           isPrivate,
@@ -60,7 +124,7 @@ function CreateRoomModal({ onClose, onCreated, session }: CreateRoomModalProps) 
   return (
     <Modal
       onClose={isSubmitting ? undefined : onClose}
-      subtitle="Параметры можно проверить в комнате ожидания"
+      subtitle="Играйте с живыми соперниками по сети или против ботов"
       title="Новый игровой стол"
     >
       <form className="form-stack create-room-form" onSubmit={submit}>
@@ -107,21 +171,107 @@ function CreateRoomModal({ onClose, onCreated, session }: CreateRoomModalProps) 
           <Toggle
             checked={isPrivate}
             description="Комната доступна только по коду"
+            disabled={withBots}
             label="Закрытый стол"
             onChange={setIsPrivate}
           />
+          <Toggle
+            checked={withBots}
+            description="Заполнить свободные места ботами вместо живых игроков"
+            label="Играть с ботами"
+            onChange={setWithBots}
+          />
         </div>
+
+        {withBots ? (
+          <BotPicker
+            bots={botList}
+            error={botsError}
+            loading={botsLoading}
+            onToggle={toggleBot}
+            seats={botSeats}
+            selected={selectedBots}
+          />
+        ) : null}
+
         {error ? <p className="form-message form-message--error">{error}</p> : null}
         <div className="modal-actions">
           <Button disabled={isSubmitting} onClick={onClose} variant="ghost">
             Отмена
           </Button>
           <Button disabled={isSubmitting} type="submit">
-            {isSubmitting ? <Spinner /> : 'Создать стол'}
+            {isSubmitting ? <Spinner /> : withBots ? 'Играть с ботами' : 'Создать стол'}
           </Button>
         </div>
       </form>
     </Modal>
+  );
+}
+
+interface BotPickerProps {
+  bots: BotSummary[];
+  seats: number;
+  selected: string[];
+  loading: boolean;
+  error: string | null;
+  onToggle: (id: string) => void;
+}
+
+function BotPicker({ bots, error, loading, onToggle, seats, selected }: BotPickerProps) {
+  const remaining = seats - selected.length;
+
+  return (
+    <section className="bot-picker" aria-label="Выбор ботов">
+      <header className="bot-picker__head">
+        <div>
+          <strong>Соперники-боты</strong>
+          <small>
+            {selected.length === 0
+              ? `Выберите до ${seats} ботов или оставьте пустым — набор будет случайным.`
+              : remaining > 0
+                ? `Выбрано ${selected.length} из ${seats}. Оставшиеся ${remaining} мест${
+                    remaining === 1 ? 'о' : 'а'
+                  } — случайные боты.`
+                : `Выбрано ${selected.length} из ${seats}.`}
+          </small>
+        </div>
+      </header>
+
+      {loading ? (
+        <div className="bot-picker__state">
+          <Spinner />
+        </div>
+      ) : null}
+      {error ? <p className="form-message form-message--error">{error}</p> : null}
+
+      {!loading && !error ? (
+        <ul className="bot-picker__list">
+          {bots.map((bot) => {
+            const isSelected = selected.includes(bot.id);
+            const isDisabled = !isSelected && selected.length >= seats;
+            return (
+              <li key={bot.id}>
+                <button
+                  aria-pressed={isSelected}
+                  className={`bot-option ${isSelected ? 'is-selected' : ''}`}
+                  disabled={isDisabled}
+                  onClick={() => onToggle(bot.id)}
+                  type="button"
+                >
+                  <span className="bot-option__main">
+                    <strong>{bot.label}</strong>
+                    <small>{bot.description}</small>
+                  </span>
+                  <span className={`bot-badge bot-badge--${bot.strength}`}>
+                    {strengthLabels[bot.strength]}
+                  </span>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      ) : null}
+    </section>
   );
 }
 
@@ -253,7 +403,7 @@ export function LobbyScreen({ onJoinRoom, onLogout, onOpenSettings, session }: L
             <Avatar name={session.user.displayName} size="small" />
             <span>
               <strong>{session.user.displayName}</strong>
-              <small>{session.user.isGuest ? 'Гость' : 'Профиль игрока'}</small>
+              <small>⭐ {session.user.ratingPoints ?? 0} · {session.user.isGuest ? 'Гость' : 'Игрок'}</small>
             </span>
           </button>
           <button

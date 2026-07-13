@@ -75,6 +75,11 @@ export class GameEngine {
   public trumpCard: Card | null = null;
   public tableCards: PlayedCard[] = [];
   public currentTrickLeadSuit: Suit | null = null;
+  /**
+   * Set when a trick is fully played but not yet cleared, so the UI can show
+   * the completed trick before cards are collected by the winner.
+   */
+  public pendingTrickWinnerId: string | null = null;
   public currentRoundCards = 1;
   public currentRoundType: RoundType = RoundType.STANDARD;
   public isDarkRound = false;
@@ -91,8 +96,17 @@ export class GameEngine {
   /** Safety cap for control-game tie-breaks */
   public maxControlGames = 20;
 
-  public constructor(maxPlayers: number = 3) {
+  /**
+   * When true, completed tricks are kept on the table (pendingTrickWinnerId is
+   * set) until finalizeTrick() is called, letting the UI show the full trick.
+   * When false (default), tricks resolve and clear immediately, which keeps
+   * direct engine consumers (tests, simulators, bot harnesses) synchronous.
+   */
+  private readonly holdCompletedTricks: boolean;
+
+  public constructor(maxPlayers: number = 3, holdCompletedTricks: boolean = false) {
     this.maxPlayers = maxPlayers;
+    this.holdCompletedTricks = holdCompletedTricks;
     this.deck = new Deck();
   }
 
@@ -336,6 +350,7 @@ export class GameEngine {
     }
     this.tableCards = [];
     this.currentTrickLeadSuit = null;
+    this.pendingTrickWinnerId = null;
     this.trumpCard = null;
     this.trumpSuit = null;
 
@@ -602,6 +617,9 @@ export class GameEngine {
       if (this.state !== GameState.PLAYING_TRICKS) {
         return { ok: false, error: 'Not in playing phase', events };
       }
+      if (this.pendingTrickWinnerId !== null) {
+        return { ok: false, error: 'Trick is resolving', events };
+      }
       if (!Number.isInteger(action.cardIndex)) {
         return { ok: false, error: 'Invalid card index', events };
       }
@@ -730,9 +748,11 @@ export class GameEngine {
           winningCardIndex = tableCardIndex;
         }
       } else if (current.card.suit === this.currentTrickLeadSuit) {
+        // A lead-suit card can only overtake another lead-suit card, never a trump.
         if (
-          winning.card.suit !== this.currentTrickLeadSuit
-          || this.getRankValue(current.card.rank) > this.getRankValue(winning.card.rank)
+          !winningIsTrump
+          && (winning.card.suit !== this.currentTrickLeadSuit
+            || this.getRankValue(current.card.rank) > this.getRankValue(winning.card.rank))
         ) {
           winningCardIndex = tableCardIndex;
         }
@@ -740,17 +760,93 @@ export class GameEngine {
     }
 
     const winnerId = this.tableCards[winningCardIndex].playerId;
+    this.verifyTrickWinner(winnerId);
     const winnerPlayer = this.players.find((player) => player.id === winnerId);
     if (winnerPlayer) {
       winnerPlayer.tricksTaken += 1;
     }
 
     this.currentPlayerIndex = this.players.findIndex((player) => player.id === winnerId);
+    // Keep the completed trick on the table so the UI can show it; the cards are
+    // cleared later by finalizeTrick() once the winner "collects" them.
+    this.pendingTrickWinnerId = winnerId;
+    if (!this.holdCompletedTricks) {
+      this.finalizeTrick();
+    }
+  }
+
+  /**
+   * Runtime self-check for the trick winner. Recomputes the winner with an
+   * independent, deliberately simple reference (highest trump wins, otherwise
+   * highest card of the lead suit) and screams a [TRICK-BUG] line with the full
+   * layout if it ever disagrees with the primary resolver. Joker tricks are
+   * skipped because their rules are special-cased in resolveTrick().
+   */
+  private verifyTrickWinner(computedWinnerId: string): void {
+    const hasJoker = this.tableCards.some((played) => played.card.isJoker);
+    const layout = this.tableCards
+      .map((played) => `${played.playerId}:${played.card.rank}${played.card.suit}`)
+      .join(', ');
+    const trumpLabel = this.trumpSuit ?? 'none';
+    if (hasJoker) {
+      console.log(
+        `[TRICK] trump=${trumpLabel} lead=${this.currentTrickLeadSuit} `
+        + `cards=[${layout}] winner=${computedWinnerId} (joker)`,
+      );
+      return;
+    }
+
+    let refIndex = 0;
+    for (let i = 1; i < this.tableCards.length; i += 1) {
+      const cur = this.tableCards[i].card;
+      const best = this.tableCards[refIndex].card;
+      const curTrump = this.trumpSuit !== null && cur.suit === this.trumpSuit;
+      const bestTrump = this.trumpSuit !== null && best.suit === this.trumpSuit;
+      if (curTrump && !bestTrump) {
+        refIndex = i;
+      } else if (curTrump && bestTrump) {
+        if (this.getRankValue(cur.rank) > this.getRankValue(best.rank)) {
+          refIndex = i;
+        }
+      } else if (!curTrump && !bestTrump && cur.suit === this.currentTrickLeadSuit) {
+        if (
+          best.suit !== this.currentTrickLeadSuit
+          || this.getRankValue(cur.rank) > this.getRankValue(best.rank)
+        ) {
+          refIndex = i;
+        }
+      }
+    }
+
+    const refWinnerId = this.tableCards[refIndex].playerId;
+    if (refWinnerId !== computedWinnerId) {
+      console.error(
+        `[TRICK-BUG] trump=${trumpLabel} lead=${this.currentTrickLeadSuit} `
+        + `cards=[${layout}] engine=${computedWinnerId} expected=${refWinnerId}`,
+      );
+      return;
+    }
+    console.log(
+      `[TRICK] trump=${trumpLabel} lead=${this.currentTrickLeadSuit} `
+      + `cards=[${layout}] winner=${computedWinnerId}`,
+    );
+  }
+
+  /**
+   * Clears the completed trick and advances the hand. Must be called after
+   * resolveTrick() has marked a pending winner (see pendingTrickWinnerId).
+   */
+  public finalizeTrick(): boolean {
+    if (this.pendingTrickWinnerId === null) {
+      return false;
+    }
+    this.pendingTrickWinnerId = null;
     this.tableCards = [];
     this.currentTrickLeadSuit = null;
     if (this.players.every((player) => player.cards.length === 0)) {
       this.transitionTo(GameState.SCORING);
     }
+    return true;
   }
 
   /**
@@ -795,6 +891,54 @@ export class GameEngine {
 
     result.sort((a, b) => a.place - b.place || b.score - a.score);
     return result;
+  }
+
+  /**
+   * Ends the match immediately because a player left the table.
+   * The leaver is always placed last (a loss); remaining players keep
+   * their relative order by current score.
+   */
+  public forfeitMatch(loserId: string): boolean {
+    if (this.state === GameState.MATCH_FINISHED) {
+      return false;
+    }
+    const loser = this.players.find((player) => player.id === loserId);
+    if (!loser) {
+      return false;
+    }
+
+    const others = this.players.filter((player) => player.id !== loserId);
+    others.sort((a, b) => b.score - a.score);
+
+    const ranking: PlayerRanking[] = [];
+    let nextPlace = 1;
+    for (const player of others) {
+      const sameScorePlace = ranking.find((entry) => entry.score === player.score)?.place;
+      const place = sameScorePlace ?? nextPlace;
+      ranking.push({
+        playerId: player.id,
+        name: player.name,
+        score: player.score,
+        place,
+        zeroScoreSecond: false,
+      });
+      if (sameScorePlace === undefined) {
+        nextPlace = place + 1;
+      }
+    }
+
+    const lastPlace = others.length + 1;
+    ranking.push({
+      playerId: loser.id,
+      name: loser.name,
+      score: loser.score,
+      place: lastPlace,
+      zeroScoreSecond: false,
+    });
+
+    this.state = GameState.MATCH_FINISHED;
+    this.ranking = ranking;
+    return true;
   }
 
   private getRankValue(rank: Rank): number {

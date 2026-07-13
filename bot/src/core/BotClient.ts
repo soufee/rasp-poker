@@ -89,6 +89,7 @@ export class BotClient {
       return;
     }
 
+    this.strategy.observe?.(ctx);
     const action = this.decide(ctx);
     if (!action) {
       return;
@@ -134,6 +135,10 @@ export class BotClient {
         roundType: choice.roundType,
         dealerIndex: choice.dealerIndex,
       };
+    }
+
+    if (state.pendingTrickWinnerId) {
+      return null;
     }
 
     if (!isMyTurn(ctx)) {

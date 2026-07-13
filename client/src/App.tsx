@@ -22,6 +22,7 @@ export default function App() {
     logout,
     session,
     updateDisplayName,
+    refreshSession,
   } = useSession();
   const { preferences, updatePreference } = usePreferences();
   const [view, setView] = useState<AppView>('lobby');
@@ -55,6 +56,7 @@ export default function App() {
     window.history.replaceState(null, '', url);
     setRoomId(null);
     setView('lobby');
+    refreshSession();
   };
 
   const handleLogout = () => {

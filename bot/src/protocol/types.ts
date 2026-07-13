@@ -53,7 +53,9 @@ export interface GameStatePayload {
   dealerIndex: number;
   currentPlayerIndex: number;
   trumpSuit: Suit | null;
+  trumpCard?: CardModel | null;
   currentTrickLeadSuit?: Suit | null;
+  pendingTrickWinnerId?: string | null;
   tableCards: PlayedCard[];
   currentRoundType: RoundType;
   currentRoundCards: number;

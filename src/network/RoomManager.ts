@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Card, Suit } from '../engine/Card';
 import { GameEngine, GameState, JokerAction } from '../engine/GameEngine';
 import { RoundType } from '../engine/Scoring';
+import prisma from '../db/prisma';
 
 const OPEN_SOCKET_STATE = 1;
 const MAX_CHAT_MESSAGES = 50;
@@ -11,7 +12,9 @@ const RATE_LIMIT_WINDOW_MS = 1000;
 const RATE_LIMIT_MAX = 20;
 const HUMAN_TURN_MS = 30_000;
 const BOT_TURN_MS = 3_000;
-const RECONNECT_GRACE_MS = 60_000;
+const FINISHED_ROOM_CLEANUP_MS = 10 * 60_000;
+/** How long a completed trick stays on the table before it is collected. */
+const TRICK_HOLD_MS = 2_200;
 
 export type PlayerLimit = 3 | 4 | 6;
 export type RoomStatus = 'waiting' | 'playing' | 'finished';
@@ -95,7 +98,16 @@ interface Client {
   messageCountWindow: number;
   windowStartedAt: number;
   disconnectTimer: ReturnType<typeof setTimeout> | null;
+  /**
+   * A human seat currently auto-played by the «Новичок» bot after a disconnect
+   * or a turn timeout. Cleared as soon as the human reconnects or acts again.
+   * Genuine bots keep isBot=true and are never marked substituted.
+   */
+  substituted: boolean;
 }
+
+/** Bot that takes over an abandoned human seat (see registry id `random`). */
+const SUBSTITUTE_BOT_LABEL = 'Новичок';
 
 class Room {
   public readonly id: string;
@@ -112,7 +124,9 @@ class Room {
   public stateVersion = 0;
   public turnDeadlineAt: number | null = null;
   public turnTimer: ReturnType<typeof setTimeout> | null = null;
+  public trickTimer: ReturnType<typeof setTimeout> | null = null;
   public timeoutCount = 0;
+  public dbStatsUpdated = false;
 
   public constructor(input: NormalizedCreateRoomInput) {
     this.id = input.id;
@@ -123,7 +137,7 @@ class Room {
     this.isPrivate = input.isPrivate;
     this.isTraining = input.isTraining;
     this.settings = { ...input.settings };
-    this.engine = new GameEngine(input.maxPlayers);
+    this.engine = new GameEngine(input.maxPlayers, true);
   }
 }
 
@@ -144,6 +158,12 @@ export interface JoinOptions {
 
 export class RoomManager {
   private readonly rooms = new Map<string, Room>();
+  private readonly matchFinishedListeners: Array<(roomId: string) => void> = [];
+
+  /** Register a callback fired once when a room's match reaches MATCH_FINISHED. */
+  public onMatchFinished(listener: (roomId: string) => void): void {
+    this.matchFinishedListeners.push(listener);
+  }
 
   public createRoom(input: CreateRoomInput): PublicRoomInfo;
   public createRoom(roomId: string, maxPlayers: number): PublicRoomInfo;
@@ -247,11 +267,16 @@ export class RoomManager {
       clearTimeout(existingClient.disconnectTimer);
       existingClient.disconnectTimer = null;
     }
+    let resumedFromSubstitute = false;
     if (existingClient) {
       existingClient.userName = normalizedUserName;
       existingClient.socket = socket;
       existingClient.connected = true;
       existingClient.isBot = existingClient.isBot || isBot;
+      if (existingClient.substituted && !isBot) {
+        existingClient.substituted = false;
+        resumedFromSubstitute = true;
+      }
     } else {
       room.clients.set(normalizedUserId, {
         userId: normalizedUserId,
@@ -263,10 +288,18 @@ export class RoomManager {
         messageCountWindow: 0,
         windowStartedAt: Date.now(),
         disconnectTimer: null,
+        substituted: false,
       });
     }
 
     this.attachSocketHandlers(room, normalizedUserId, socket);
+    if (resumedFromSubstitute) {
+      this.broadcastEvent(room, {
+        type: 'SYSTEM',
+        message: `Игрок ${normalizedUserName} вернулся за стол и снова ходит сам.`,
+      });
+      this.scheduleTurnTimer(room);
+    }
     this.broadcastRoomInfo(room.id);
     this.broadcastState(room.id);
 
@@ -298,6 +331,13 @@ export class RoomManager {
       return;
     }
 
+    if (room.engine.state === GameState.MATCH_FINISHED && !room.dbStatsUpdated) {
+      room.dbStatsUpdated = true;
+      void this.updateUserStats(room);
+      this.notifyMatchFinished(room.id);
+      this.scheduleFinishedRoomCleanup(room);
+    }
+
     for (const client of room.clients.values()) {
       if (!client.connected) {
         continue;
@@ -314,6 +354,91 @@ export class RoomManager {
     }
   }
 
+  private async updateUserStats(room: Room): Promise<void> {
+    const ranking =
+      room.engine.ranking.length > 0
+        ? room.engine.ranking
+        : room.engine.computeRanking();
+    if (ranking.length === 0) return;
+
+    const maxPlace = Math.max(...ranking.map((r) => r.place));
+
+    for (const r of ranking) {
+      const client = room.clients.get(r.playerId);
+      const isBot = client?.isBot === true;
+      const isGuest = r.playerId.startsWith('guest-');
+
+      if (isBot || isGuest) {
+        continue;
+      }
+
+      const isLast = r.place === maxPlace;
+      let points = 0;
+      if (r.place === 1) {
+        points = 100;
+      } else if (r.place === 2 && !isLast) {
+        points = 50;
+      } else if (r.place === 3 && !isLast) {
+        points = 20;
+      }
+
+      const isWon = r.place === 1;
+
+      try {
+        await prisma.user.update({
+          where: { id: r.playerId },
+          data: {
+            ratingPoints: { increment: points },
+            gamesPlayed: { increment: 1 },
+            gamesWon: { increment: isWon ? 1 : 0 },
+          },
+        });
+      } catch (err) {
+        console.error(`[db] Failed to update stats for user ${r.playerId}:`, err);
+      }
+    }
+  }
+
+  private notifyMatchFinished(roomId: string): void {
+    for (const listener of this.matchFinishedListeners) {
+      try {
+        listener(roomId);
+      } catch (err) {
+        console.error(`[rooms] match-finished listener failed for ${roomId}:`, err);
+      }
+    }
+  }
+
+  private scheduleFinishedRoomCleanup(room: Room): void {
+    const timer = setTimeout(() => {
+      this.maybeDeleteFinishedRoom(room.id);
+    }, FINISHED_ROOM_CLEANUP_MS);
+    timer.unref?.();
+  }
+
+  /** Drop a finished, empty room to avoid unbounded in-memory growth. */
+  private maybeDeleteFinishedRoom(roomId: string): void {
+    const room = this.rooms.get(roomId);
+    if (!room || room.engine.state !== GameState.MATCH_FINISHED) {
+      return;
+    }
+    const hasConnectedHuman = Array.from(room.clients.values()).some(
+      (client) => client.connected && !client.isBot,
+    );
+    if (hasConnectedHuman) {
+      return;
+    }
+    for (const client of room.clients.values()) {
+      if (client.disconnectTimer) {
+        clearTimeout(client.disconnectTimer);
+      }
+    }
+    if (room.turnTimer) {
+      clearTimeout(room.turnTimer);
+    }
+    this.rooms.delete(roomId);
+  }
+
   public handleAction(roomId: string, userId: string, action: unknown): void {
     const room = this.rooms.get(roomId);
     if (!room) {
@@ -322,6 +447,18 @@ export class RoomManager {
     if (!this.isRecord(action) || typeof action.type !== 'string') {
       this.rejectAction(room, userId, 'Некорректный формат действия.', 'INVALID_FORMAT');
       return;
+    }
+
+    // Any real message from a substituted human means they are back at the
+    // keyboard, so control is handed back from the «Новичок» bot.
+    const sender = room.clients.get(userId);
+    if (sender && !sender.isBot && sender.substituted) {
+      sender.substituted = false;
+      this.broadcastEvent(room, {
+        type: 'SYSTEM',
+        message: `Игрок ${sender.userName} вернулся и снова ходит сам.`,
+      });
+      this.scheduleTurnTimer(room);
     }
 
     let stateChanged = false;
@@ -341,6 +478,9 @@ export class RoomManager {
       case 'CHAT_SEND':
         this.handleChatSend(room, userId, action);
         break;
+      case 'LEAVE_ROOM':
+        stateChanged = this.handleLeaveRoom(room, userId);
+        break;
       case 'PING':
         this.sendEvent(room.clients.get(userId)?.socket as RoomSocket, {
           type: 'SYSTEM',
@@ -359,6 +499,42 @@ export class RoomManager {
     }
   }
 
+  /**
+   * A seated player leaves the table. During an active match this finishes
+   * the game immediately: the leaver is recorded with a loss and the standings
+   * are frozen for everyone else.
+   */
+  private handleLeaveRoom(room: Room, userId: string): boolean {
+    const isPlayer = room.engine.players.some((player) => player.id === userId);
+    const isActive =
+      room.engine.state !== GameState.WAITING_PLAYERS
+      && room.engine.state !== GameState.MATCH_FINISHED;
+
+    if (!isPlayer || !isActive) {
+      return false;
+    }
+
+    const finished = room.engine.forfeitMatch(userId);
+    if (!finished) {
+      return false;
+    }
+
+    const leaver = room.clients.get(userId);
+    if (leaver) {
+      leaver.connected = false;
+      if (leaver.disconnectTimer) {
+        clearTimeout(leaver.disconnectTimer);
+        leaver.disconnectTimer = null;
+      }
+    }
+
+    this.broadcastEvent(room, {
+      type: 'SYSTEM',
+      message: `Игрок ${leaver?.userName ?? userId} покинул стол. Матч завершён.`,
+    });
+    return true;
+  }
+
   /** Server-side auto action when turn timer fires */
   public forceDefaultAction(roomId: string): boolean {
     const room = this.rooms.get(roomId);
@@ -373,12 +549,13 @@ export class RoomManager {
     const stateBefore = engine.state;
 
     if (engine.state === GameState.CONTROL_GAME_SETUP && engine.controlGameChooserId) {
+      const chooserId = engine.controlGameChooserId;
+      this.markSubstituted(room, chooserId);
       const types = Array.from(engine.playedRoundTypes);
       const type = types.includes(RoundType.STANDARD) ? RoundType.STANDARD : types[0];
       if (!type) {
         return false;
       }
-      const chooserId = engine.controlGameChooserId;
       const dealerIndex = engine.players.findIndex((p) => p.id === chooserId);
       const ok = engine.setupControlGame(
         chooserId,
@@ -386,15 +563,7 @@ export class RoomManager {
         dealerIndex >= 0 ? dealerIndex : 0,
       );
       if (ok) {
-        room.timeoutCount += 1;
-        room.stateVersion += 1;
-        this.broadcastEvent(room, {
-          type: 'TURN_TIMEOUT',
-          payload: { playerId: chooserId, stateVersion: room.stateVersion },
-        });
-        this.scheduleTurnTimer(room);
-        this.broadcastRoomInfo(room.id);
-        this.broadcastState(room.id);
+        this.afterAutoAction(room, chooserId);
       }
       return ok;
     }
@@ -403,24 +572,17 @@ export class RoomManager {
     if (!current) {
       return false;
     }
+    this.markSubstituted(room, current.id);
 
     if (engine.state === GameState.BIDDING) {
       const bids = engine.getLegalBids(current.id);
       if (bids.length === 0) {
         return false;
       }
-      const bid = Math.min(...bids);
+      const bid = this.pickRandom(bids);
       const result = engine.applyAction({ type: 'PLACE_BID', playerId: current.id, bid });
       if (result.ok) {
-        room.timeoutCount += 1;
-        room.stateVersion += 1;
-        this.broadcastEvent(room, {
-          type: 'TURN_TIMEOUT',
-          payload: { playerId: current.id, stateVersion: room.stateVersion },
-        });
-        this.scheduleTurnTimer(room);
-        this.broadcastRoomInfo(room.id);
-        this.broadcastState(room.id);
+        this.afterAutoAction(room, current.id);
       }
       return result.ok;
     }
@@ -430,8 +592,10 @@ export class RoomManager {
       if (plays.length === 0) {
         return false;
       }
-      const play = plays[0];
-      const jokerAction = play.jokerActions?.[0];
+      const play = this.pickRandom(plays);
+      const jokerAction = play.jokerActions && play.jokerActions.length > 0
+        ? this.pickRandom(play.jokerActions)
+        : undefined;
       const result = engine.applyAction({
         type: 'PLAY_CARD',
         playerId: current.id,
@@ -439,20 +603,46 @@ export class RoomManager {
         jokerAction,
       });
       if (result.ok) {
-        room.timeoutCount += 1;
-        room.stateVersion += 1;
-        this.broadcastEvent(room, {
-          type: 'TURN_TIMEOUT',
-          payload: { playerId: current.id, stateVersion: room.stateVersion },
-        });
-        this.scheduleTurnTimer(room);
-        this.broadcastRoomInfo(room.id);
-        this.broadcastState(room.id);
+        this.afterAutoAction(room, current.id);
       }
       return result.ok;
     }
 
     return stateBefore !== engine.state;
+  }
+
+  /** Broadcast bookkeeping shared by every auto (timeout / substitute) action. */
+  private afterAutoAction(room: Room, actorId: string): void {
+    room.timeoutCount += 1;
+    room.stateVersion += 1;
+    this.broadcastEvent(room, {
+      type: 'TURN_TIMEOUT',
+      payload: { playerId: actorId, stateVersion: room.stateVersion },
+    });
+    this.scheduleTurnTimer(room);
+    this.broadcastRoomInfo(room.id);
+    this.broadcastState(room.id);
+  }
+
+  /**
+   * Marks a human seat as auto-played by the «Новичок» bot after a timeout.
+   * No-op for genuine bots or seats already substituted.
+   */
+  private markSubstituted(room: Room, playerId: string): void {
+    const client = room.clients.get(playerId);
+    if (!client || client.isBot || client.substituted) {
+      return;
+    }
+    client.substituted = true;
+    this.broadcastEvent(room, {
+      type: 'SYSTEM',
+      message: `Игрок ${client.userName} не ходит — за него доигрывает бот «${SUBSTITUTE_BOT_LABEL}».`,
+    });
+  }
+
+  private pickRandom<T>(items: readonly T[]): T {
+    const index = Math.floor(Math.random() * items.length);
+    return items[index];
   }
 
   private scheduleTurnTimer(room: Room): void {
@@ -463,6 +653,13 @@ export class RoomManager {
     room.turnDeadlineAt = null;
 
     const engine = room.engine;
+
+    // A completed trick is being shown: hold it, then collect and continue.
+    if (engine.pendingTrickWinnerId !== null) {
+      this.scheduleTrickFinalize(room);
+      return;
+    }
+
     const timedStates = [
       GameState.BIDDING,
       GameState.PLAYING_TRICKS,
@@ -486,8 +683,14 @@ export class RoomManager {
     }
 
     const client = room.clients.get(actorId);
-    const isBot = client?.isBot === true;
-    const delay = isBot ? BOT_TURN_MS : HUMAN_TURN_MS;
+    // Bots, disconnected seats and «Новичок»-substituted seats all move at the
+    // fast bot pace so the table never stalls waiting for someone who is gone.
+    const isAutoActor =
+      !client
+      || client.isBot
+      || client.substituted
+      || !client.connected;
+    const delay = isAutoActor ? BOT_TURN_MS : HUMAN_TURN_MS;
     room.turnDeadlineAt = Date.now() + delay;
     const versionAtSchedule = room.stateVersion;
 
@@ -499,6 +702,30 @@ export class RoomManager {
       this.applyDefaultTurnAction(live);
     }, delay);
     room.turnTimer.unref?.();
+  }
+
+  /** Holds the completed trick briefly, then clears it and resumes play. */
+  private scheduleTrickFinalize(room: Room): void {
+    if (room.trickTimer) {
+      clearTimeout(room.trickTimer);
+      room.trickTimer = null;
+    }
+    const versionAtSchedule = room.stateVersion;
+    room.trickTimer = setTimeout(() => {
+      const live = this.rooms.get(room.id);
+      if (!live || live.stateVersion !== versionAtSchedule) {
+        return;
+      }
+      room.trickTimer = null;
+      if (!live.engine.finalizeTrick()) {
+        return;
+      }
+      live.stateVersion += 1;
+      this.scheduleTurnTimer(live);
+      this.broadcastRoomInfo(live.id);
+      this.broadcastState(live.id);
+    }, TRICK_HOLD_MS);
+    room.trickTimer.unref?.();
   }
 
   private getLegacyCreateInput(roomId: string, maxPlayers: number | undefined): CreateRoomInput {
@@ -651,25 +878,23 @@ export class RoomManager {
       client.connected = false;
       if (client.disconnectTimer) {
         clearTimeout(client.disconnectTimer);
+        client.disconnectTimer = null;
       }
-      // Grace period then bot takeover for humans mid-game
-      if (!client.isBot && room.engine.state !== GameState.WAITING_PLAYERS) {
-        client.disconnectTimer = setTimeout(() => {
-          const live = room.clients.get(userId);
-          if (live && !live.connected) {
-            live.isBot = true;
-            this.broadcastEvent(room, {
-              type: 'SYSTEM',
-              message: `Игрок ${live.userName} заменён ботом после disconnect.`,
-            });
-            this.scheduleTurnTimer(room);
-            this.broadcastState(room.id);
-          }
-        }, RECONNECT_GRACE_MS);
-        client.disconnectTimer.unref?.();
+      // A human dropping mid-game is immediately covered by the «Новичок» bot so
+      // the remaining players can finish. Control returns on reconnect.
+      const midGame =
+        room.engine.state !== GameState.WAITING_PLAYERS
+        && room.engine.state !== GameState.MATCH_FINISHED;
+      if (!client.isBot && midGame) {
+        this.markSubstituted(room, userId);
+        this.scheduleTurnTimer(room);
       }
       this.broadcastRoomInfo(room.id);
       this.broadcastState(room.id);
+
+      if (room.engine.state === GameState.MATCH_FINISHED) {
+        this.maybeDeleteFinishedRoom(room.id);
+      }
     });
   }
 
@@ -1000,6 +1225,7 @@ export class RoomManager {
         card: this.serializeCard(playedCard.card),
       })),
       currentTrickLeadSuit: engine.currentTrickLeadSuit,
+      pendingTrickWinnerId: engine.pendingTrickWinnerId,
       currentRoundCards: engine.currentRoundCards,
       currentRoundType: engine.currentRoundType,
       isDarkRound: engine.isDarkRound,
@@ -1025,6 +1251,7 @@ export class RoomManager {
           tricksTaken: player.tricksTaken,
           connected: client?.connected ?? false,
           isBot: client?.isBot ?? false,
+          substituted: client?.substituted ?? false,
         };
         if (player.id === viewerId) {
           const hideSelf = engine.isDarkRound && engine.state === GameState.BIDDING;

@@ -1,5 +1,6 @@
-import { type CSSProperties, useEffect, useMemo, useState } from 'react';
+import { type CSSProperties, useEffect, useMemo, useRef, useState } from 'react';
 import type {
+  CardModel,
   ChatMessage,
   ConnectionStatus,
   GameSnapshot,
@@ -23,6 +24,17 @@ import { ChatPanel } from './ChatPanel';
 import { ControlSetup, JokerModal, ResultModal, ScoreSheet } from './GameOverlays';
 import { PlayerSeat } from './PlayerSeat';
 import { PlayingCard } from './PlayingCard';
+
+const SEAT_PLAY_OFFSET: Record<string, [number, number]> = {
+  bottom: [0, 82],
+  top: [0, -82],
+  left: [-155, -4],
+  right: [155, -4],
+  'upper-left': [-124, -58],
+  'upper-right': [124, -58],
+  'lower-left': [-124, 58],
+  'lower-right': [124, 58],
+};
 
 interface GameTableProps {
   roomId: string;
@@ -54,6 +66,8 @@ export function GameTable({
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [isLeaveConfirmOpen, setIsLeaveConfirmOpen] = useState(false);
   const [jokerCardIndex, setJokerCardIndex] = useState<number | null>(null);
+  const [roundDeltas, setRoundDeltas] = useState<Record<string, number> | null>(null);
+  const historyLenRef = useRef<number>(-1);
   const viewer = game.players.find((player) => player.id === session.user.id);
   const currentPlayer = game.players[game.currentPlayerIndex];
   const viewerTurn = currentPlayer?.id === session.user.id;
@@ -61,6 +75,84 @@ export function GameTable({
     () => rotatePlayersForViewer(game.players, session.user.id),
     [game.players, session.user.id],
   );
+  const sortedHand = useMemo(() => {
+    const cards = viewer?.cards ?? [];
+    const rankValue: Record<string, number> = {
+      '6': 0,
+      '7': 1,
+      '8': 2,
+      '9': 3,
+      '10': 4,
+      J: 5,
+      Q: 6,
+      K: 7,
+      A: 8,
+    };
+    const suitRank: Record<string, number> = { CLUBS: 0, DIAMONDS: 1, HEARTS: 2, SPADES: 3 };
+    const trump = game.trumpSuit;
+    const weight = (card: CardModel | null): number => {
+      if (!card) {
+        return -1;
+      }
+      if (isJoker(card)) {
+        return 100_000;
+      }
+      const rank = rankValue[card.rank] ?? 0;
+      if (trump && card.suit === trump) {
+        return 10_000 + rank;
+      }
+      return (suitRank[card.suit] ?? 0) * 100 + rank;
+    };
+    return cards
+      .map((card, index) => ({ card, index }))
+      .sort((left, right) => weight(left.card) - weight(right.card));
+  }, [viewer?.cards, game.trumpSuit]);
+
+  const jokerNotice = useMemo(() => {
+    for (const played of game.tableCards) {
+      const action = played.jokerAction;
+      if (!action) {
+        continue;
+      }
+      const owner = game.players.find((player) => player.id === played.playerId);
+      const who = owner?.id === session.user.id ? 'Вы' : (owner?.name ?? 'Игрок');
+      if (action.type === 'DEMAND_SUIT') {
+        return `${who}: джокер требует старшие ${suitNames[action.suit]} ${suitSymbols[action.suit]}`;
+      }
+      if (action.type === 'TAKE') {
+        return `${who}: джокер забирает взятку`;
+      }
+      if (action.type === 'DROP') {
+        return `${who}: джокер — сброс${action.suit ? ` ${suitSymbols[action.suit]}` : ''}`;
+      }
+    }
+    return null;
+  }, [game.tableCards, game.players, session.user.id]);
+
+  const collectStyle = useMemo<CSSProperties | undefined>(() => {
+    if (!game.pendingTrickWinnerId) {
+      return undefined;
+    }
+    const winnerVisualIndex = visualPlayers.findIndex(
+      (player) => player.id === game.pendingTrickWinnerId,
+    );
+    if (winnerVisualIndex < 0) {
+      return undefined;
+    }
+    const position = getSeatPosition(game.maxPlayers, winnerVisualIndex);
+    const offsets: Record<string, [number, number]> = {
+      bottom: [0, 260],
+      top: [0, -260],
+      left: [-360, 0],
+      right: [360, 0],
+      'upper-left': [-320, -180],
+      'upper-right': [320, -180],
+      'lower-left': [-320, 180],
+      'lower-right': [320, 180],
+    };
+    const [x, y] = offsets[position] ?? [0, -260];
+    return { '--collect-x': `${x}px`, '--collect-y': `${y}px` } as CSSProperties;
+  }, [game.pendingTrickWinnerId, game.maxPlayers, visualPlayers]);
   const excludedBid = getExcludedDealerBid(game);
   const roundNumber = game.currentRoundIndex + 1;
   const totalRounds = game.plan.length;
@@ -70,6 +162,26 @@ export function GameTable({
   useEffect(() => {
     setIsChatOpen(preferences.chatOpen);
   }, [preferences.chatOpen]);
+
+  useEffect(() => {
+    const history = game.scoreHistory ?? [];
+    const length = history.length;
+    if (historyLenRef.current === -1) {
+      historyLenRef.current = length;
+      return;
+    }
+    if (length <= historyLenRef.current) {
+      return;
+    }
+    historyLenRef.current = length;
+    const latest = history[length - 1];
+    if (!latest || !latest.scores) {
+      return;
+    }
+    setRoundDeltas(latest.scores);
+    const timer = setTimeout(() => setRoundDeltas(null), 3200);
+    return () => clearTimeout(timer);
+  }, [game.scoreHistory]);
 
   const playCard = (cardIndex: number) => {
     const card = viewer?.cards[cardIndex];
@@ -87,7 +199,7 @@ export function GameTable({
   };
 
   const isCardAllowed = (cardIndex: number): boolean => {
-    if (!viewerTurn || game.state !== 'PLAYING_TRICKS') {
+    if (!viewerTurn || game.state !== 'PLAYING_TRICKS' || game.pendingTrickWinnerId) {
       return false;
     }
 
@@ -196,21 +308,32 @@ export function GameTable({
         <div className="table-rail">
           <div className="table-felt">
             <div className="table-felt__pattern" />
-            <div className="trump-chip">
-              <span>Козырь</span>
-              {game.currentRoundType === 'NO_TRUMP' || !game.trumpSuit ? (
-                <strong>—</strong>
-              ) : (
-                <strong
-                  className={
-                    game.trumpSuit === 'HEARTS' || game.trumpSuit === 'DIAMONDS' ? 'is-red' : ''
-                  }
-                  title={suitNames[game.trumpSuit]}
-                >
-                  {suitSymbols[game.trumpSuit]}
-                </strong>
-              )}
-            </div>
+            {game.currentRoundType === 'NO_TRUMP' || !game.trumpSuit ? (
+              <div className="trump-panel trump-panel--none">
+                <span>Козырь</span>
+                <strong>Бескозырка</strong>
+              </div>
+            ) : (
+              <div
+                className={`trump-panel ${
+                  game.trumpSuit === 'HEARTS' || game.trumpSuit === 'DIAMONDS'
+                    ? 'trump-panel--red'
+                    : ''
+                }`}
+              >
+                <span>Козырь</span>
+                <div className="trump-panel__face">
+                  {game.trumpCard ? (
+                    <PlayingCard card={game.trumpCard} className="playing-card--trump" />
+                  ) : (
+                    <strong className="trump-panel__symbol" title={suitNames[game.trumpSuit]}>
+                      {suitSymbols[game.trumpSuit]}
+                    </strong>
+                  )}
+                  <em>{suitNames[game.trumpSuit]}</em>
+                </div>
+              </div>
+            )}
 
             {visualPlayers.map((player, visualIndex) => {
               const originalIndex = game.players.findIndex((item) => item.id === player.id);
@@ -222,14 +345,21 @@ export function GameTable({
                   isViewer={player.id === session.user.id}
                   key={player.id}
                   player={player}
+                  phase={game.state}
                   position={getSeatPosition(game.maxPlayers, visualIndex)}
+                  scoreDelta={roundDeltas ? roundDeltas[player.id] : undefined}
                 />
               );
             })}
 
+            {jokerNotice ? <div className="joker-notice">{jokerNotice}</div> : null}
+
             <div
-              className={`table-cards table-cards--${game.tableCards.length}`}
+              className={`table-cards table-cards--${game.tableCards.length} ${
+                game.pendingTrickWinnerId ? 'is-collecting' : ''
+              }`}
               aria-label="Карты текущей взятки"
+              style={collectStyle}
             >
               {game.tableCards.length === 0 ? (
                 <div className="table-cards__empty">
@@ -242,20 +372,26 @@ export function GameTable({
                     (player) => player.id === played.playerId,
                   );
                   const player = game.players.find((item) => item.id === played.playerId);
+                  const seatPosition =
+                    playerIndex >= 0 ? getSeatPosition(game.maxPlayers, playerIndex) : 'top';
+                  const [seatX, seatY] = SEAT_PLAY_OFFSET[seatPosition] ?? [0, 0];
+                  const isViewerCard = played.playerId === session.user.id;
+                  const isWinnerCard = played.playerId === game.pendingTrickWinnerId;
 
                   return (
                     <div
-                      className="table-play"
+                      className={`table-play ${isWinnerCard ? 'is-winner' : ''}`}
                       key={`${played.playerId}-${index}`}
                       style={
                         {
+                          '--seat-x': `${seatX}px`,
+                          '--seat-y': `${seatY}px`,
                           '--play-index': index,
-                          '--player-index': playerIndex,
                         } as CSSProperties
                       }
                     >
                       <PlayingCard card={played.card} />
-                      <span>{player?.name ?? 'Игрок'}</span>
+                      <span>{isViewerCard ? 'Вы' : (player?.name ?? 'Игрок')}</span>
                       {played.jokerAction ? (
                         <small>
                           {played.jokerAction.type === 'TAKE'
@@ -350,17 +486,29 @@ export function GameTable({
         )}
 
         <div className="player-hand" aria-label="Ваши карты">
-          {viewer?.cards.map((card, cardIndex) => (
-            <PlayingCard
-              card={card}
-              className={isCardAllowed(cardIndex) ? 'is-allowed' : ''}
-              disabled={!card || !isCardAllowed(cardIndex)}
-              faceDown={!card}
-              interactive
-              key={`${card?.rank ?? 'hidden'}-${card?.suit ?? 'card'}-${cardIndex}`}
-              onClick={() => playCard(cardIndex)}
-            />
-          ))}
+          {sortedHand.map(({ card, index }) => {
+            const isTrumpCard =
+              !!card
+              && !isJoker(card)
+              && !!game.trumpSuit
+              && card.suit === game.trumpSuit;
+            return (
+              <PlayingCard
+                card={card}
+                className={[
+                  isCardAllowed(index) ? 'is-allowed' : '',
+                  isTrumpCard ? 'is-trump' : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
+                disabled={!card || !isCardAllowed(index)}
+                faceDown={!card}
+                interactive
+                key={`${card?.rank ?? 'hidden'}-${card?.suit ?? 'card'}-${index}`}
+                onClick={() => playCard(index)}
+              />
+            );
+          })}
           {!viewer || viewer.cards.length === 0 ? (
             <div className="hand-empty">Карты появятся после раздачи</div>
           ) : null}
@@ -417,24 +565,36 @@ export function GameTable({
       ) : null}
 
       {game.state === 'MATCH_FINISHED' ? (
-        <ResultModal game={game} onLeave={onLeave} viewerId={session.user.id} />
+        <ResultModal
+          game={game}
+          onLeave={onLeave}
+          preferences={preferences}
+          viewerId={session.user.id}
+        />
       ) : null}
 
       {isLeaveConfirmOpen ? (
         <Modal
           onClose={() => setIsLeaveConfirmOpen(false)}
-          subtitle="Текущее место может занять другой игрок"
+          subtitle="Вам засчитают поражение"
           title="Покинуть партию?"
           size="small"
         >
           <p className="leave-confirm-copy">
-            При возвращении сервер попробует восстановить ваше место по профилю.
+            Матч завершится немедленно. Вам запишут поражение, а места остальных игроков
+            определятся по текущему счёту.
           </p>
           <div className="modal-actions">
             <Button onClick={() => setIsLeaveConfirmOpen(false)} variant="ghost">
               Остаться
             </Button>
-            <Button onClick={onLeave} variant="danger">
+            <Button
+              onClick={() => {
+                send({ type: 'LEAVE_ROOM' });
+                onLeave();
+              }}
+              variant="danger"
+            >
               Покинуть
             </Button>
           </div>

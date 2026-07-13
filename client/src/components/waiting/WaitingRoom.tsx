@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useMemo, useState } from 'react';
 import type {
   ChatMessage,
   ConnectionStatus,
@@ -9,7 +9,7 @@ import type {
   Session,
 } from '../../types/game';
 import { ChatPanel } from '../game/ChatPanel';
-import { Avatar, Button, ConnectionBadge, Logo, Spinner, Toggle } from '../ui';
+import { Avatar, Button, ConnectionBadge, Logo, Spinner } from '../ui';
 
 interface WaitingRoomProps {
   roomId: string;
@@ -33,13 +33,12 @@ export function WaitingRoom({
   session,
 }: WaitingRoomProps) {
   const maxPlayers = roomInfo?.maxPlayers ?? game?.maxPlayers ?? 4;
-  const [settings, setSettings] = useState<RoomSettings>({
+  const settings: RoomSettings = roomInfo?.settings ?? {
     hasLadder: true,
     hasMiser: true,
     playersCount: maxPlayers,
-  });
+  };
   const [copyLabel, setCopyLabel] = useState('Копировать ссылку');
-  const settingsHydrated = useRef(false);
   const players = game?.players ?? [];
   const hostId = game?.hostId ?? roomInfo?.hostId ?? players[0]?.id ?? session.user.id;
   const isHost = hostId === session.user.id;
@@ -49,28 +48,6 @@ export function WaitingRoom({
     () => Array.from({ length: maxPlayers }, (_, index) => players[index] ?? null),
     [maxPlayers, players],
   );
-
-  useEffect(() => {
-    setSettings((current) => {
-      if (current.playersCount === maxPlayers) {
-        return current;
-      }
-
-      return {
-        ...current,
-        playersCount: maxPlayers,
-      };
-    });
-  }, [maxPlayers]);
-
-  useEffect(() => {
-    if (!roomInfo?.settings || settingsHydrated.current) {
-      return;
-    }
-
-    settingsHydrated.current = true;
-    setSettings(roomInfo.settings);
-  }, [roomInfo?.settings]);
 
   const copyInvite = async () => {
     const url = new URL(window.location.href);
@@ -155,40 +132,10 @@ export function WaitingRoom({
             <header>
               <div>
                 <span className="eyebrow">Формат партии</span>
-                <h2>{isHost ? 'Настройте игру' : 'Настройки хозяина'}</h2>
+                <h2>{isHost ? 'Готовы начать?' : 'Ожидание хозяина'}</h2>
               </div>
               <span className="players-badge">{settings.playersCount} игроков</span>
             </header>
-            <div className="settings-list">
-              <Toggle
-                checked={settings.hasLadder}
-                description="Раунды с постепенным увеличением руки"
-                disabled={!isHost}
-                label="Лесенка"
-                onChange={(checked) => {
-                  if (isHost) {
-                    setSettings((current) => ({
-                      ...current,
-                      hasLadder: checked,
-                    }));
-                  }
-                }}
-              />
-              <Toggle
-                checked={settings.hasMiser}
-                description="Дополнительная серия без взяток"
-                disabled={!isHost}
-                label="Мизер"
-                onChange={(checked) => {
-                  if (isHost) {
-                    setSettings((current) => ({
-                      ...current,
-                      hasMiser: checked,
-                    }));
-                  }
-                }}
-              />
-            </div>
             {isHost ? (
               <div className="waiting-start">
                 <p>
@@ -202,7 +149,7 @@ export function WaitingRoom({
               </div>
             ) : (
               <div className="waiting-start">
-                <p>Партия начнётся, когда хозяин подтвердит настройки.</p>
+                <p>Партия начнётся, когда хозяин нажмёт «Начать игру».</p>
                 <span className="waiting-pulse">Ожидаем хозяина</span>
               </div>
             )}

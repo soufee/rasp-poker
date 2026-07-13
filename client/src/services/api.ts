@@ -1,4 +1,11 @@
-import type { RoomSettings, RoomSummary, Session, SessionUser } from '../types/game';
+import type {
+  BotStrength,
+  BotSummary,
+  RoomSettings,
+  RoomSummary,
+  Session,
+  SessionUser,
+} from '../types/game';
 
 interface RegisterInput {
   displayName: string;
@@ -14,6 +21,8 @@ interface LoginInput {
 interface CreateRoomInput extends RoomSettings {
   name: string;
   isPrivate: boolean;
+  /** Strategy ids and/or the "random" token to seat as opponents. */
+  bots?: string[];
 }
 
 interface MessageResponse {
@@ -110,6 +119,9 @@ function normalizeUser(value: unknown): SessionUser {
     displayName,
     role: getString(value, 'role') || undefined,
     verified: value.verified === true,
+    ratingPoints: typeof value.ratingPoints === 'number' ? value.ratingPoints : 0,
+    gamesPlayed: typeof value.gamesPlayed === 'number' ? value.gamesPlayed : 0,
+    gamesWon: typeof value.gamesWon === 'number' ? value.gamesWon : 0,
   };
 }
 
@@ -228,6 +240,35 @@ export const authApi = {
   },
 };
 
+function normalizeBot(value: unknown): BotSummary | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const id = getString(value, 'id');
+  if (!id) {
+    return null;
+  }
+  const rawStrength = getString(value, 'strength', 'medium');
+  const strength: BotStrength =
+    rawStrength === 'strong' || rawStrength === 'basic' ? rawStrength : 'medium';
+
+  return {
+    id,
+    label: getString(value, 'label', id),
+    description: getString(value, 'description'),
+    strength,
+  };
+}
+
+export const botsApi = {
+  async list(token?: string, signal?: AbortSignal): Promise<BotSummary[]> {
+    const data = await request<unknown>('/api/bots', { method: 'GET', signal }, token);
+    const bots = isRecord(data) && Array.isArray(data.bots) ? data.bots : [];
+
+    return bots.map(normalizeBot).filter((bot): bot is BotSummary => bot !== null);
+  },
+};
+
 export const roomsApi = {
   async list(token?: string, signal?: AbortSignal): Promise<RoomSummary[]> {
     const data = await request<unknown>(
@@ -248,6 +289,7 @@ export const roomsApi = {
   },
 
   async create(input: CreateRoomInput, session: Session): Promise<RoomSummary> {
+    const hasBots = Array.isArray(input.bots) && input.bots.length > 0;
     const data = await request<unknown>(
       '/api/rooms',
       {
@@ -259,6 +301,7 @@ export const roomsApi = {
           name: input.name,
           ownerId: session.user.id,
           ownerName: session.user.displayName,
+          ...(hasBots ? { bots: input.bots } : {}),
         }),
         method: 'POST',
       },

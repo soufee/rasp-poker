@@ -24,6 +24,16 @@ export function isMyTurn(ctx: DecisionContext): boolean {
   return ctx.state.currentPlayerIndex === ctx.myIndex;
 }
 
+export function knownHand(cards: Array<CardModel | null>): CardModel[] {
+  const out: CardModel[] = [];
+  for (const card of cards) {
+    if (card) {
+      out.push(card);
+    }
+  }
+  return out;
+}
+
 export function myVisibleCards(ctx: DecisionContext): Array<{ index: number; card: CardModel }> {
   const out: Array<{ index: number; card: CardModel }> = [];
   ctx.me.cards.forEach((card, index) => {

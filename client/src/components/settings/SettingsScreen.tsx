@@ -59,6 +59,20 @@ export function SettingsScreen({
             <Avatar name={session.user.displayName} size="large" />
             <strong>{session.user.displayName}</strong>
             <span>{session.user.isGuest ? 'Гостевой профиль' : session.user.email}</span>
+            <div className="profile-stats-card">
+              <div>
+                <span>{session.user.ratingPoints ?? 0}</span>
+                очков
+              </div>
+              <div>
+                <span>{session.user.gamesPlayed ?? 0}</span>
+                игр
+              </div>
+              <div>
+                <span>{session.user.gamesWon ?? 0}</span>
+                побед
+              </div>
+            </div>
           </div>
           <nav aria-label="Разделы настроек">
             <button

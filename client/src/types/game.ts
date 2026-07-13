@@ -38,6 +38,7 @@ export interface PlayerState {
   connected?: boolean;
   isReady?: boolean;
   isBot?: boolean;
+  substituted?: boolean;
 }
 
 export interface PlayerRanking {
@@ -76,6 +77,8 @@ export interface GameSnapshot {
   dealerIndex: number;
   currentPlayerIndex: number;
   trumpSuit: Suit | null;
+  trumpCard?: CardModel | null;
+  pendingTrickWinnerId?: string | null;
   tableCards: PlayedCard[];
   currentRoundCards: number;
   currentRoundType: RoundType;
@@ -110,6 +113,15 @@ export interface RoomSummary {
   settings?: RoomSettings;
 }
 
+export type BotStrength = 'strong' | 'medium' | 'basic';
+
+export interface BotSummary {
+  id: string;
+  label: string;
+  description: string;
+  strength: BotStrength;
+}
+
 export interface RoomInfo {
   id: string;
   name: string;
@@ -138,6 +150,9 @@ export interface SessionUser {
   role?: string;
   verified: boolean;
   isGuest?: boolean;
+  ratingPoints?: number;
+  gamesPlayed?: number;
+  gamesWon?: number;
 }
 
 export interface Session {
@@ -173,7 +188,8 @@ export type OutgoingRoomEvent =
       roundType: RoundType;
       dealerIndex: number;
     }
-  | { type: 'CHAT_SEND'; text: string };
+  | { type: 'CHAT_SEND'; text: string }
+  | { type: 'LEAVE_ROOM' };
 
 export type ConnectionStatus =
   'connecting' | 'connected' | 'reconnecting' | 'disconnected' | 'error';

@@ -64,6 +64,9 @@ const authRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
           displayName: dev.displayName,
           role: dev.role,
           verified: true,
+          ratingPoints: dbUser?.ratingPoints ?? 0,
+          gamesPlayed: dbUser?.gamesPlayed ?? 0,
+          gamesWon: dbUser?.gamesWon ?? 0,
         },
       };
     }
@@ -75,6 +78,7 @@ const authRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
     }
 
     const u = request.user as AuthUser;
+    const dbUser = await prisma.user.findUnique({ where: { id: u.id } });
     return {
       mode: 'production',
       autoLogin: false,
@@ -84,6 +88,9 @@ const authRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
         displayName: u.displayName,
         role: u.role,
         verified: u.verified,
+        ratingPoints: dbUser?.ratingPoints ?? 0,
+        gamesPlayed: dbUser?.gamesPlayed ?? 0,
+        gamesWon: dbUser?.gamesWon ?? 0,
       },
     };
   });
@@ -115,6 +122,9 @@ const authRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
         displayName: dev.displayName,
         role: dev.role,
         verified: true,
+        ratingPoints: dbUser?.ratingPoints ?? 0,
+        gamesPlayed: dbUser?.gamesPlayed ?? 0,
+        gamesWon: dbUser?.gamesWon ?? 0,
       },
     };
   });
@@ -241,6 +251,9 @@ const authRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
         displayName: user.displayName,
         role: user.role,
         verified: user.verified,
+        ratingPoints: user.ratingPoints,
+        gamesPlayed: user.gamesPlayed,
+        gamesWon: user.gamesWon,
       },
       rankedPlayAllowed: user.verified,
     };
@@ -303,6 +316,7 @@ const authRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
 
   fastify.get('/me', { preHandler: [authenticate] }, async (request) => {
     const u = request.user as AuthUser;
+    const dbUser = await prisma.user.findUnique({ where: { id: u.id } });
     return {
       id: u.id,
       email: u.email,
@@ -312,6 +326,9 @@ const authRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
       rankedPlayAllowed: isLocal || u.verified === true,
       mode: isProduction ? 'production' : 'local',
       authRequired: isProduction,
+      ratingPoints: dbUser?.ratingPoints ?? 0,
+      gamesPlayed: dbUser?.gamesPlayed ?? 0,
+      gamesWon: dbUser?.gamesWon ?? 0,
     };
   });
 

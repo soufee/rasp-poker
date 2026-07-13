@@ -3,6 +3,29 @@ import { authApi } from '../services/api';
 import type { Session } from '../types/game';
 
 const STORAGE_KEY = 'rasp-poker.session';
+const GUEST_STATS_KEY = 'rasp-poker.guest-stats';
+
+interface GuestStats {
+  ratingPoints: number;
+  gamesPlayed: number;
+  gamesWon: number;
+}
+
+export function readGuestStats(): GuestStats {
+  const raw = localStorage.getItem(GUEST_STATS_KEY);
+  if (!raw) {
+    return { ratingPoints: 0, gamesPlayed: 0, gamesWon: 0 };
+  }
+  try {
+    return JSON.parse(raw) as GuestStats;
+  } catch {
+    return { ratingPoints: 0, gamesPlayed: 0, gamesWon: 0 };
+  }
+}
+
+export function writeGuestStats(stats: GuestStats): void {
+  localStorage.setItem(GUEST_STATS_KEY, JSON.stringify(stats));
+}
 
 interface UseSessionResult {
   session: Session | null;
@@ -13,6 +36,7 @@ interface UseSessionResult {
   updateDisplayName: (name: string) => void;
   logout: () => void;
   clearBootstrapError: () => void;
+  refreshSession: () => void;
 }
 
 function readStoredSession(): Session | null {
@@ -99,18 +123,55 @@ export function useSession(): UseSessionResult {
   }, []);
 
   const continueAsGuest = useCallback((name: string) => {
+    const stats = readGuestStats();
     const nextSession: Session = {
       user: {
         displayName: name.trim(),
         id: `guest-${crypto.randomUUID()}`,
         isGuest: true,
         verified: true,
+        ratingPoints: stats.ratingPoints,
+        gamesPlayed: stats.gamesPlayed,
+        gamesWon: stats.gamesWon,
       },
     };
 
     persistSession(nextSession);
     setSession(nextSession);
     setBootstrapError(null);
+  }, []);
+
+  const refreshSession = useCallback(() => {
+    const stored = readStoredSession();
+    if (!stored) return;
+
+    if (stored.user.isGuest) {
+      const stats = readGuestStats();
+      setSession((current) => {
+        if (!current) return null;
+        const nextSession = {
+          ...current,
+          user: {
+            ...current.user,
+            ratingPoints: stats.ratingPoints,
+            gamesPlayed: stats.gamesPlayed,
+            gamesWon: stats.gamesWon,
+          },
+        };
+        persistSession(nextSession);
+        return nextSession;
+      });
+    } else {
+      authApi
+        .bootstrap(stored.token)
+        .then((nextSession) => {
+          persistSession(nextSession);
+          setSession(nextSession);
+        })
+        .catch((err) => {
+          console.error('Failed to refresh session stats:', err);
+        });
+    }
   }, []);
 
   const updateDisplayName = useCallback((name: string) => {
@@ -150,5 +211,6 @@ export function useSession(): UseSessionResult {
     logout,
     session,
     updateDisplayName,
+    refreshSession,
   };
 }

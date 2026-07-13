@@ -1,7 +1,9 @@
-import { useMemo, useState } from 'react';
-import type { GameSnapshot, JokerAction, RoundType, Suit } from '../../types/game';
+import { useEffect, useMemo, useState } from 'react';
+import type { GameSnapshot, JokerAction, RoundType, Suit, Preferences } from '../../types/game';
 import { formatScore, getWinner, roundNames, suitNames, suitSymbols } from '../../utils/game';
 import { Avatar, Button, Modal } from '../ui';
+import { playEndGameSound } from '../../utils/sound';
+import { readGuestStats, writeGuestStats } from '../../hooks/useSession';
 
 const suits: Suit[] = ['SPADES', 'HEARTS', 'DIAMONDS', 'CLUBS'];
 
@@ -294,12 +296,56 @@ function SpinnerMark() {
 interface ResultModalProps {
   game: GameSnapshot;
   viewerId: string;
+  preferences?: Preferences;
   onLeave: () => void;
 }
 
-export function ResultModal({ game, onLeave, viewerId }: ResultModalProps) {
+export function ResultModal({ game, onLeave, viewerId, preferences }: ResultModalProps) {
   const ranking = [...game.players].sort((left, right) => right.score - left.score);
   const winner = getWinner(game.players);
+
+  const viewerRank = game.ranking?.find((r) => r.playerId === viewerId);
+  const isWinner = viewerRank?.place === 1;
+  const maxPlace = game.ranking && game.ranking.length > 0
+    ? Math.max(...game.ranking.map((r) => r.place))
+    : 0;
+  const isLast = viewerRank?.place === maxPlace;
+
+  useEffect(() => {
+    // 1) Sound effect (respecting preference)
+    if (preferences?.sound !== false) {
+      playEndGameSound(isWinner);
+    }
+
+    // 2) Update guest stats if the user is a guest
+    const isGuest = viewerId.startsWith('guest-');
+    if (isGuest) {
+      const stats = readGuestStats();
+      const nextPoints = isWinner
+        ? 100
+        : (viewerRank?.place === 2 && !isLast
+          ? 50
+          : (viewerRank?.place === 3 && !isLast ? 20 : 0));
+      writeGuestStats({
+        ratingPoints: stats.ratingPoints + nextPoints,
+        gamesPlayed: stats.gamesPlayed + 1,
+        gamesWon: stats.gamesWon + (isWinner ? 1 : 0),
+      });
+    }
+  }, [game.players.length, viewerId, isWinner, isLast, viewerRank?.place, preferences?.sound]);
+
+  let heroMessage = '';
+  let heroClass = 'result-msg';
+  if (isWinner) {
+    heroMessage = 'Поздравляем с победой!';
+    heroClass += ' result-msg--win';
+  } else if (isLast) {
+    heroMessage = 'Сожалеем, вы заняли последнее место.';
+    heroClass += ' result-msg--lose';
+  } else if (viewerRank) {
+    heroMessage = `Вы заняли ${viewerRank.place} место`;
+    heroClass += ' result-msg--neutral';
+  }
 
   return (
     <Modal
@@ -312,19 +358,23 @@ export function ResultModal({ game, onLeave, viewerId }: ResultModalProps) {
           ♛
         </span>
         <Avatar name={winner?.name ?? 'Победитель'} size="large" />
-        <span className="eyebrow">Победитель</span>
-        <h3>{winner?.id === viewerId ? 'Вы победили!' : winner?.name}</h3>
-        <strong>{winner?.score ?? 0} очков</strong>
+        <span className="eyebrow">Победитель: {winner?.name ?? '—'} ({winner?.score ?? 0} очков)</span>
+        <h3 className={heroClass}>{heroMessage}</h3>
       </div>
       <ol className="result-ranking">
-        {ranking.map((player, index) => (
-          <li className={player.id === viewerId ? 'is-viewer' : ''} key={player.id}>
-            <span>{index + 1}</span>
-            <Avatar name={player.name} size="small" />
-            <strong>{player.id === viewerId ? 'Вы' : player.name}</strong>
-            <b>{player.score}</b>
-          </li>
-        ))}
+        {ranking.map((player) => {
+          const rankInfo = game.ranking?.find((r) => r.playerId === player.id);
+          const displayPlace = rankInfo ? rankInfo.place : '';
+
+          return (
+            <li className={player.id === viewerId ? 'is-viewer' : ''} key={player.id}>
+              <span>{displayPlace || '—'}</span>
+              <Avatar name={player.name} size="small" />
+              <strong>{player.id === viewerId ? 'Вы' : player.name}</strong>
+              <b>{player.score}</b>
+            </li>
+          );
+        })}
       </ol>
       <div className="modal-actions modal-actions--center">
         <Button onClick={onLeave}>Вернуться в лобби</Button>

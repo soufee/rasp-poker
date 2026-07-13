@@ -7,6 +7,7 @@ import {
   RoomManagerError,
   roomManager,
 } from '../network/RoomManager';
+import { botManager } from '../network/bots/BotManager';
 
 interface CreateRoomBody {
   id?: unknown;
@@ -17,10 +18,17 @@ interface CreateRoomBody {
   isPrivate?: unknown;
   /** Training / bot-only table — unverified users allowed in production */
   isTraining?: unknown;
+  /** Opponent bots to seat: strategy ids and/or the "random" token. */
+  bots?: unknown;
 }
 
 interface CreateRoomRoute {
   Body: CreateRoomBody;
+}
+
+interface ParsedCreateRoom extends CreateRoomInput {
+  isTraining: boolean;
+  bots: string[];
 }
 
 function isRecord(value: unknown): value is CreateRoomBody {
@@ -31,10 +39,18 @@ function isPlayerLimit(value: unknown): value is PlayerLimit {
   return value === 3 || value === 4 || value === 6;
 }
 
-function parseCreateRoomBody(
-  value: unknown,
-  owner: AuthUser,
-): (CreateRoomInput & { isTraining: boolean }) | null {
+function parseBots(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0);
+}
+
+function hasBots(body: CreateRoomBody | undefined): boolean {
+  return parseBots(body?.bots).length > 0;
+}
+
+function parseCreateRoomBody(value: unknown, owner: AuthUser): ParsedCreateRoom | null {
   if (!isRecord(value)) {
     return null;
   }
@@ -46,6 +62,7 @@ function parseCreateRoomBody(
     || typeof body.hasMiser !== 'boolean'
     || (body.isPrivate !== undefined && typeof body.isPrivate !== 'boolean')
     || (body.isTraining !== undefined && typeof body.isTraining !== 'boolean')
+    || (body.bots !== undefined && !Array.isArray(body.bots))
   ) {
     return null;
   }
@@ -53,21 +70,28 @@ function parseCreateRoomBody(
     return null;
   }
 
+  const bots = parseBots(body.bots);
+  const withBots = bots.length > 0;
+
   return {
     id: body.id,
     name: body.name,
     maxPlayers: body.maxPlayers,
     hasLadder: body.hasLadder,
     hasMiser: body.hasMiser,
-    isPrivate: body.isPrivate,
+    // Bot tables are personal training tables — keep them out of the public list.
+    isPrivate: withBots ? true : body.isPrivate,
     ownerId: owner.id,
     ownerName: owner.displayName || owner.email || 'Player',
-    isTraining: body.isTraining === true,
+    isTraining: body.isTraining === true || withBots,
+    bots,
   };
 }
 
 export const lobbyRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get('/api/rooms', async () => roomManager.listRooms());
+
+  fastify.get('/api/bots', async () => ({ bots: await botManager.listAvailable() }));
 
   fastify.post<CreateRoomRoute>(
     '/api/rooms',
@@ -75,9 +99,9 @@ export const lobbyRoutes: FastifyPluginAsync = async (fastify) => {
       preHandler: [
         authenticate,
         async (request, reply) => {
-          // Ranked (default) requires verification; training skips
+          // Ranked (default) requires verification; training / bot tables skip
           const body = request.body as CreateRoomBody | undefined;
-          const isTraining = body?.isTraining === true;
+          const isTraining = body?.isTraining === true || hasBots(body);
           if (!isTraining && !isLocal) {
             await requireVerification(request, reply);
           }
@@ -96,13 +120,9 @@ export const lobbyRoutes: FastifyPluginAsync = async (fastify) => {
         });
       }
 
+      let room;
       try {
-        const room = roomManager.createRoom(input);
-        return reply.status(201).send({
-          room,
-          isTraining: input.isTraining,
-          rankedPlay: !input.isTraining,
-        });
+        room = roomManager.createRoom(input);
       } catch (error) {
         if (error instanceof RoomManagerError) {
           const statusCode = error.code === 'ROOM_ALREADY_EXISTS' ? 409 : 400;
@@ -110,8 +130,35 @@ export const lobbyRoutes: FastifyPluginAsync = async (fastify) => {
         }
         throw error;
       }
+
+      let seatedBots: Awaited<ReturnType<typeof botManager.addBots>> = [];
+      if (input.bots.length > 0) {
+        seatedBots = await seatRequestedBots(room.id, input.bots, room.maxPlayers);
+      }
+
+      return reply.status(201).send({
+        room,
+        isTraining: input.isTraining,
+        rankedPlay: !input.isTraining,
+        bots: seatedBots,
+      });
     },
   );
 };
+
+/** Fill every non-owner seat with the requested bots, padding with random ones. */
+async function seatRequestedBots(
+  roomId: string,
+  requested: string[],
+  maxPlayers: number,
+): Promise<Awaited<ReturnType<typeof botManager.addBots>>> {
+  const freeSeats = Math.max(0, maxPlayers - 1);
+  const filled = requested.slice(0, freeSeats);
+  while (filled.length < freeSeats) {
+    filled.push('random');
+  }
+  const strategyIds = await botManager.resolveBotIds(filled, freeSeats);
+  return botManager.addBots(roomId, strategyIds);
+}
 
 export default lobbyRoutes;

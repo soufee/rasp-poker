@@ -48,7 +48,7 @@ async function main(): Promise<void> {
   );
 
   // Owner seat as bot host for auto-start
-  botHarness.addBotToRoom(room.id, ownerId, ownerName, 'random');
+  botHarness.addBotToRoom(room.id, ownerId, ownerName, 'antigravity');
   // Two more distinct profiles (skip if owner already random)
   botHarness.addBotToRoom(room.id, 'bot-tight', 'TightBot', 'tight');
   botHarness.addBotToRoom(room.id, 'bot-aggro', 'AggroBot', 'aggressive');

@@ -2,6 +2,8 @@ import type { DecisionContext } from '../core/stateSelectors';
 import type { JokerAction, RoundType } from '../protocol/types';
 
 export interface Strategy {
+  readonly name?: string;
+  observe?(ctx: DecisionContext): void;
   chooseBid(ctx: DecisionContext): number;
   chooseCard(ctx: DecisionContext): number;
   chooseJokerAction(ctx: DecisionContext, cardIndex: number): JokerAction;

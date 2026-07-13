@@ -1,20 +1,54 @@
 /**
- * Grok bot entrypoint (issue #22).
+ * Network bot entrypoint (issue #22).
  *
- * Join existing room:
- *   npx tsx src/index.ts --room <roomId> --userId bot-grok --userName Grok
+ * Composer (default):
+ *   npx tsx src/index.ts --room <roomId> --strategy composer
  *
- * Smoke (create room + Grok host + fillers, short plan):
- *   BOT_SHORT_PLAN=1 npx tsx src/index.ts --smoke
+ * Grok:
+ *   npx tsx src/index.ts --room <roomId> --strategy grok --userName Grok
+ *
+ * Smoke:
+ *   npx tsx src/index.ts --smoke --strategy composer
  */
 import { parseConfig } from './config';
 import { BotClient } from './core/BotClient';
+import { ComposerStrategy } from './strategy/ComposerStrategy';
+import { GlmStrategy } from './strategy/GlmStrategy';
 import { GrokStrategy } from './strategy/GrokStrategy';
 import { RandomStrategy } from './strategy/RandomStrategy';
+import { SolarisStrategy } from './strategy/SolarisStrategy';
 import type { Strategy } from './strategy/Strategy';
 
-function makeStrategy(name: 'grok' | 'random'): Strategy {
-  return name === 'random' ? new RandomStrategy() : new GrokStrategy();
+function makeStrategy(name: 'solaris' | 'grok' | 'composer' | 'random' | 'glm'): Strategy {
+  if (name === 'solaris') {
+    return new SolarisStrategy();
+  }
+  if (name === 'random') {
+    return new RandomStrategy();
+  }
+  if (name === 'grok') {
+    return new GrokStrategy();
+  }
+  if (name === 'glm') {
+    return new GlmStrategy();
+  }
+  return new ComposerStrategy();
+}
+
+function botLabel(name: 'solaris' | 'grok' | 'composer' | 'random' | 'glm'): string {
+  if (name === 'solaris') {
+    return 'Solaris';
+  }
+  if (name === 'grok') {
+    return 'Grok';
+  }
+  if (name === 'composer') {
+    return 'Composer';
+  }
+  if (name === 'glm') {
+    return 'GLM';
+  }
+  return 'RandomBot';
 }
 
 async function createRoom(
@@ -46,7 +80,7 @@ async function createRoom(
     method: 'POST',
     headers,
     body: JSON.stringify({
-      name: `Grok Arena ${new Date().toISOString().slice(11, 19)}`,
+      name: `${ownerName} Arena ${new Date().toISOString().slice(11, 19)}`,
       maxPlayers: players,
       hasLadder: true,
       hasMiser: true,
@@ -73,17 +107,16 @@ async function main(): Promise<void> {
 
   if (cfg.smoke) {
     process.env.BOT_SHORT_PLAN = process.env.BOT_SHORT_PLAN || '1';
-    const { roomId, token, ownerId } = await createRoom(cfg.host, cfg.players, 'Grok');
-    console.log(`[smoke] room=${roomId} host=${ownerId}`);
+    const label = botLabel(cfg.strategy);
+    const { roomId, token, ownerId } = await createRoom(cfg.host, cfg.players, label);
+    console.log(`[smoke] room=${roomId} host=${ownerId} strategy=${cfg.strategy}`);
 
-    // Host = Grok (smart). Join as guest with room ownerId so display name is "Grok"
-    // (JWT would force local superuser displayName "dev").
     const hostClient = new BotClient({
       host: cfg.host,
       roomId,
       userId: ownerId,
-      userName: 'Grok',
-      strategy: new GrokStrategy(),
+      userName: label,
+      strategy: makeStrategy(cfg.strategy),
       thinkDelayMs: cfg.thinkDelayMs,
     });
     clients.push(hostClient);
@@ -130,7 +163,7 @@ async function main(): Promise<void> {
     thinkDelayMs: cfg.thinkDelayMs,
   });
   await client.start();
-  console.log(`Grok bot joined room ${cfg.roomId} as ${cfg.userName} (${cfg.strategy})`);
+  console.log(`Bot joined room ${cfg.roomId} as ${cfg.userName} (${cfg.strategy})`);
 }
 
 main().catch((err) => {

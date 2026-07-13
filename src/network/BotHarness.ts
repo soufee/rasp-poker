@@ -1,10 +1,13 @@
 import { roomManager } from './RoomManager';
 import { GameState } from '../engine/GameEngine';
 import { RoundType } from '../engine/Scoring';
+import { antigravityStrategy } from './AntigravityStrategy';
 
-export type BotProfile = 'tight' | 'aggressive' | 'random';
+export type BotProfile = 'tight' | 'aggressive' | 'random' | 'antigravity';
 
 interface BotCard {
+  suit?: 'SPADES' | 'HEARTS' | 'DIAMONDS' | 'CLUBS';
+  rank?: '6' | '7' | '8' | '9' | '10' | 'J' | 'Q' | 'K' | 'A';
   isJoker?: boolean;
 }
 
@@ -12,6 +15,10 @@ interface BotPlayerState {
   id: string;
   cards: Array<BotCard | null>;
   isBot?: boolean;
+  name: string;
+  score: number;
+  currentBid: number | null;
+  tricksTaken: number;
 }
 
 interface LegalPlay {
@@ -32,6 +39,14 @@ interface BotState {
   maxPlayers?: number;
   playedRoundTypes?: string[];
   players: BotPlayerState[];
+  trumpSuit: 'SPADES' | 'HEARTS' | 'DIAMONDS' | 'CLUBS' | null;
+  currentTrickLeadSuit: 'SPADES' | 'HEARTS' | 'DIAMONDS' | 'CLUBS' | null;
+  currentRoundType: string;
+  tableCards: Array<{
+    playerId: string;
+    card: { suit: 'SPADES' | 'HEARTS' | 'DIAMONDS' | 'CLUBS'; rank: '6' | '7' | '8' | '9' | '10' | 'J' | 'Q' | 'K' | 'A'; isJoker?: boolean };
+    jokerAction?: any;
+  }>;
 }
 
 interface BotServerMessage {
@@ -49,6 +64,7 @@ const BOT_PROFILES: Array<{ id: string; name: string; profile: BotProfile }> = [
   { id: 'bot-tight', name: 'TightBot', profile: 'tight' },
   { id: 'bot-aggro', name: 'AggroBot', profile: 'aggressive' },
   { id: 'bot-random', name: 'RandomBot', profile: 'random' },
+  { id: 'bot-antigravity', name: 'Antigravity', profile: 'antigravity' },
 ];
 
 export class BotHarness {
@@ -80,7 +96,10 @@ export class BotHarness {
     options: { shortPlan?: boolean; ownerId?: string } = {},
   ): void {
     for (const bot of BOT_PROFILES) {
-      this.addBotToRoom(roomId, bot.id, bot.name, bot.profile);
+      // If filling, add the tight, aggro, and antigravity bots
+      if (bot.profile !== 'random') {
+        this.addBotToRoom(roomId, bot.id, bot.name, bot.profile);
+      }
     }
     const room = roomManager.getRoom(roomId);
     if (!room) {
@@ -126,15 +145,24 @@ export class BotHarness {
       return;
     }
 
+    const profile = bot.profile;
+
     if (state.state === GameState.CONTROL_GAME_SETUP && state.controlGameChooserId === botId) {
       const types = state.playedRoundTypes ?? [];
-      const roundType = types.includes(RoundType.STANDARD)
+      let roundType = types.includes(RoundType.STANDARD)
         ? RoundType.STANDARD
         : (types[0] as RoundType) || RoundType.STANDARD;
-      const dealerIndex = Math.max(
+      let dealerIndex = Math.max(
         0,
         state.players.findIndex((p) => p.id === botId),
       );
+
+      if (profile === 'antigravity') {
+        const choice = antigravityStrategy.chooseControlGame(state as any, botId);
+        roundType = choice.roundType;
+        dealerIndex = choice.dealerIndex;
+      }
+
       setTimeout(() => {
         const current = this.bots.get(botId);
         if (!current || current.lastVersion !== state.stateVersion) {
@@ -154,7 +182,6 @@ export class BotHarness {
       return;
     }
 
-    const profile = bot.profile;
     const version = state.stateVersion;
 
     setTimeout(() => {
@@ -168,7 +195,9 @@ export class BotHarness {
         if (!allowedBids || allowedBids.length === 0) {
           return;
         }
-        const bid = this.pickBid(profile, allowedBids);
+        const bid = profile === 'antigravity'
+          ? antigravityStrategy.chooseBid(state as any, botId)
+          : this.pickBid(profile, allowedBids);
         roomManager.handleAction(roomId, botId, { type: 'PLACE_BID', bid });
         return;
       }
@@ -187,12 +216,22 @@ export class BotHarness {
           });
           return;
         }
-        const play = this.pickPlay(profile, plays, currentPlayer);
-        roomManager.handleAction(roomId, botId, {
-          type: 'PLAY_CARD',
-          cardIndex: play.cardIndex,
-          jokerAction: play.jokerActions?.[0],
-        });
+
+        if (profile === 'antigravity') {
+          const play = antigravityStrategy.choosePlay(state as any, botId, plays);
+          roomManager.handleAction(roomId, botId, {
+            type: 'PLAY_CARD',
+            cardIndex: play.cardIndex,
+            jokerAction: play.jokerActions?.[0],
+          });
+        } else {
+          const play = this.pickPlay(profile, plays, currentPlayer);
+          roomManager.handleAction(roomId, botId, {
+            type: 'PLAY_CARD',
+            cardIndex: play.cardIndex,
+            jokerAction: play.jokerActions?.[0],
+          });
+        }
       }
     }, 30);
   }
@@ -233,3 +272,4 @@ export class BotHarness {
 
 export const botHarness = new BotHarness();
 export { BOT_PROFILES };
+

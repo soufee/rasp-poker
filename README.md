@@ -39,6 +39,26 @@ curl -s http://localhost:3000/ready | jq
 
 Авторизация (register/login/verify) **обязательна только на production**.
 
+## Почта (SMTP / Yandex)
+
+Письма: подтверждение email, сброс пароля, прочие уведомления (`src/auth/email.ts`, `src/mail/`).
+
+Соответствие Spring → env:
+
+| Spring | Env |
+|--------|-----|
+| `spring.mail.host` | `SMTP_HOST=smtp.yandex.ru` |
+| `spring.mail.port` | `SMTP_PORT=465` |
+| `spring.mail.protocol=smtps` | `SMTP_SECURE=true` |
+| `spring.mail.username` | `SMTP_USER` |
+| `spring.mail.password` | `SMTP_PASSWORD` (**plain**, не `ENC(...)`) |
+| `mail.debug` | `MAIL_DEBUG=true` |
+
+Пароль из Spring `ENC(...)` — это Jasypt-шифрование. В Node его нужно **расшифровать** своим `jasypt.encryptor.password` либо создать [пароль приложения Яндекс](https://id.yandex.ru/security/app-passwords) и положить **только** в `.env` (не в git).
+
+- SMTP не задан → письма пишутся в консоль сервера (удобно local).
+- `APP_ENV=production` → SMTP обязателен, при старте `verify()`.
+
 ## Production / удалённый сервер
 
 На сервере задайте переменные окружения (или `.env` **вне git**):

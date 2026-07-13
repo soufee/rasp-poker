@@ -4,6 +4,7 @@ import { config, validateConfig, isLocal, isProduction } from './config/env';
 import { runMigrations } from './db/migrate';
 import { connectRedis } from './db/redis';
 import { ensureLocalDevUser } from './db/seedLocal';
+import { verifyMailTransport } from './mail/transport';
 import prisma from './db/prisma';
 import fastify from 'fastify';
 import fastifyJwt from '@fastify/jwt';
@@ -30,7 +31,10 @@ async function bootstrap() {
   await connectRedis();
   console.log('[redis] Ready');
 
-  // 4) Local superuser auto-seed
+  // 4) SMTP (Yandex etc.) — console fallback if not configured in local
+  await verifyMailTransport();
+
+  // 5) Local superuser auto-seed
   if (isLocal) {
     await ensureLocalDevUser();
   }

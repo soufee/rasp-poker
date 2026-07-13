@@ -23,6 +23,7 @@
     "db:migrate:dev": "prisma migrate dev",
     "db:studio": "prisma studio",
     "smoke:bots": "tsx scripts/smoke-bots.ts",
+    "mail:test": "tsx scripts/send-test-mail.ts",
     "postinstall": "prisma generate"
   },
   "repository": {
@@ -45,6 +46,7 @@
     "dotenv": "^17.4.2",
     "fastify": "^5.10.0",
     "ioredis": "^5.11.1",
+    "nodemailer": "^9.0.3",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "uuid": "^14.0.1"
@@ -57,6 +59,7 @@
     "@types/dotenv": "^6.1.1",
     "@types/jest": "^30.0.0",
     "@types/node": "^26.1.1",
+    "@types/nodemailer": "^8.0.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@types/uuid": "^10.0.0",

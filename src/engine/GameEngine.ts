@@ -1,5 +1,5 @@
 import { Deck } from './Deck';
-import { Card, Suit } from './Card';
+import { Card, Suit, Rank } from './Card';
 
 export enum GameState {
   WAITING_PLAYERS = 'WAITING_PLAYERS',
@@ -20,6 +20,17 @@ export interface Player {
   tricksTaken: number;
 }
 
+export type JokerAction = 
+  | { type: 'TAKE' }
+  | { type: 'DEMAND_SUIT', suit: Suit }
+  | { type: 'DROP', suit?: Suit }; // suit required if played first
+
+export interface PlayedCard {
+  playerId: string;
+  card: Card;
+  jokerAction?: JokerAction;
+}
+
 export class GameEngine {
   public state: GameState = GameState.WAITING_PLAYERS;
   public players: Player[] = [];
@@ -28,7 +39,8 @@ export class GameEngine {
   public currentPlayerIndex: number = 0;
   public deck: Deck;
   public trumpSuit: Suit | null = null;
-  public tableCards: { playerId: string, card: Card }[] = [];
+  public tableCards: PlayedCard[] = [];
+  public currentTrickLeadSuit: Suit | null = null;
   public currentRoundCards: number = 1;
   public isDarkRound: boolean = false;
 
@@ -189,5 +201,125 @@ export class GameEngine {
     }
 
     return true;
+  }
+
+  public playCard(playerId: string, cardIndex: number, jokerAction?: JokerAction): boolean {
+    if (this.state !== GameState.PLAYING_TRICKS) return false;
+    
+    const pIndex = this.players.findIndex(p => p.id === playerId);
+    if (pIndex !== this.currentPlayerIndex) return false;
+
+    const player = this.players[pIndex];
+    if (cardIndex < 0 || cardIndex >= player.cards.length) return false;
+
+    const card = player.cards[cardIndex];
+
+    // Joker validation
+    if (card.isJoker) {
+      if (!jokerAction) return false; // Action must be specified
+      if (this.tableCards.length === 0 && jokerAction.type === 'DROP' && !jokerAction.suit) return false; // Suit required to lead drop
+      if (this.tableCards.length > 0 && jokerAction.type === 'DEMAND_SUIT') return false; // Cannot demand suit when not leading
+    } else {
+      // Normal card validation (Follow suit)
+      if (this.tableCards.length > 0) {
+        const leadSuit = this.currentTrickLeadSuit;
+        const hasLeadSuit = player.cards.some(c => c.suit === leadSuit && !c.isJoker);
+        if (hasLeadSuit && card.suit !== leadSuit) return false; // Must follow suit if possible
+      }
+    }
+
+    // Play card
+    player.cards.splice(cardIndex, 1);
+    this.tableCards.push({ playerId, card, jokerAction });
+
+    // Set lead suit if this is the first card
+    if (this.tableCards.length === 1) {
+      if (card.isJoker) {
+        if (jokerAction?.type === 'DEMAND_SUIT' || jokerAction?.type === 'DROP') {
+          this.currentTrickLeadSuit = jokerAction.suit || null;
+        } else {
+          this.currentTrickLeadSuit = null; // 'TAKE' means no strict lead suit (or effectively none)
+        }
+      } else {
+        this.currentTrickLeadSuit = card.suit;
+      }
+    }
+
+    // Check if trick is complete
+    if (this.tableCards.length === this.players.length) {
+      this.resolveTrick();
+    } else {
+      this.advanceTurn();
+    }
+
+    return true;
+  }
+
+  private resolveTrick() {
+    let winningCardIndex = 0;
+    const leadSuit = this.currentTrickLeadSuit;
+    let isJokerTaking = false;
+
+    for (let i = 0; i < this.tableCards.length; i++) {
+      const current = this.tableCards[i];
+      
+      if (current.card.isJoker) {
+        if (current.jokerAction?.type === 'TAKE' || current.jokerAction?.type === 'DEMAND_SUIT') {
+          winningCardIndex = i;
+          isJokerTaking = true;
+          // If joker claims to take, it beats everything. (If multiple jokers existed, last played, but there's only 1)
+        }
+        // If 'DROP', it acts as a virtual 5, so it loses to any normal card of lead/trump.
+        // It can only win if literally everyone else played a non-lead, non-trump card and joker was lead as drop, 
+        // which means it acts as lead suit 5. We just let it be treated as rank 5 below if needed.
+        continue;
+      }
+
+      if (isJokerTaking) continue; // Nothing beats the joker taking
+
+      const winning = this.tableCards[winningCardIndex];
+      if (winning.card.isJoker) {
+        // Winning card is joker as 'DROP', evaluate current card against it.
+        // Joker drop acts as 5 of lead suit.
+        if (current.card.suit === leadSuit || current.card.suit === this.trumpSuit) {
+           winningCardIndex = i;
+        }
+        continue;
+      }
+
+      // Normal comparison
+      const currentIsTrump = current.card.suit === this.trumpSuit;
+      const winningIsTrump = winning.card.suit === this.trumpSuit;
+
+      if (currentIsTrump && !winningIsTrump) {
+        winningCardIndex = i;
+      } else if (currentIsTrump && winningIsTrump) {
+        if (this.getRankValue(current.card.rank) > this.getRankValue(winning.card.rank)) {
+          winningCardIndex = i;
+        }
+      } else if (current.card.suit === leadSuit) {
+        if (winning.card.suit !== leadSuit || this.getRankValue(current.card.rank) > this.getRankValue(winning.card.rank)) {
+          winningCardIndex = i;
+        }
+      }
+    }
+
+    const winnerId = this.tableCards[winningCardIndex].playerId;
+    const winnerPlayer = this.players.find(p => p.id === winnerId);
+    if (winnerPlayer) winnerPlayer.tricksTaken++;
+
+    this.currentPlayerIndex = this.players.findIndex(p => p.id === winnerId);
+    this.tableCards = [];
+    this.currentTrickLeadSuit = null;
+
+    // Check if round is over (no cards left in hand)
+    if (this.players[0].cards.length === 0) {
+      this.transitionTo(GameState.SCORING);
+    }
+  }
+
+  private getRankValue(rank: Rank): number {
+    const order = ['6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
+    return order.indexOf(rank);
   }
 }

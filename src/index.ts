@@ -1,6 +1,14 @@
 import fastify from 'fastify';
+import fastifyJwt from '@fastify/jwt';
+import authRoutes from './auth/routes';
 
 const server = fastify({ logger: true });
+
+server.register(fastifyJwt, {
+  secret: process.env.JWT_SECRET || 'super-secret-fallback-key'
+});
+
+server.register(authRoutes, { prefix: '/auth' });
 
 server.get('/ping', async (request, reply) => {
   return { status: 'ok', time: new Date().toISOString() };

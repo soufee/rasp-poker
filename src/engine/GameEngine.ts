@@ -29,6 +29,8 @@ export class GameEngine {
   public deck: Deck;
   public trumpSuit: Suit | null = null;
   public tableCards: { playerId: string, card: Card }[] = [];
+  public currentRoundCards: number = 1;
+  public isDarkRound: boolean = false;
 
   constructor(maxPlayers: number = 3) {
     this.maxPlayers = maxPlayers;
@@ -111,5 +113,81 @@ export class GameEngine {
     }
 
     this.transitionTo(GameState.BIDDING);
+  }
+
+  public getAvailableBids(playerIndex: number): number[] {
+    const isDealer = playerIndex === this.dealerIndex;
+    const maxBid = this.currentRoundCards;
+    let allowedBids: number[] = [];
+
+    // All bids from 0 to maxBid are initially allowed
+    for (let i = 0; i <= maxBid; i++) allowedBids.push(i);
+
+    // Rule: consecutive passes limit
+    const consecutivePassesAllowed = this.maxPlayers === 3 ? 2 : this.maxPlayers === 4 ? 3 : 4;
+    let currentPasses = 0;
+    
+    // Check previous players' bids
+    // To do this properly, we trace back from the current player to the start of the bidding round.
+    // The bidding starts at getNextPlayerIndex(dealerIndex).
+    let checkIdx = this.getNextPlayerIndex(this.dealerIndex);
+    while (checkIdx !== playerIndex) {
+      if (this.players[checkIdx].currentBid === 0) {
+        currentPasses++;
+      } else {
+        currentPasses = 0; // Reset consecutive passes
+      }
+      checkIdx = this.getNextPlayerIndex(checkIdx);
+    }
+
+    let restrictPass = false;
+    if (currentPasses >= consecutivePassesAllowed) {
+      restrictPass = true;
+    }
+
+    // Rule: "Except" for dealer
+    let exceptBid: number | null = null;
+    if (isDealer) {
+      const sumBids = this.players.reduce((sum, p) => sum + (p.currentBid || 0), 0);
+      exceptBid = maxBid - sumBids;
+    }
+
+    // Apply restrictions
+    if (restrictPass) {
+      allowedBids = allowedBids.filter(b => b !== 0);
+    }
+
+    if (isDealer && exceptBid !== null) {
+      allowedBids = allowedBids.filter(b => b !== exceptBid);
+    }
+
+    // Collision resolution: if dealer has no allowed bids (e.g., 1 card, pass limit reached, and exceptBid is 1)
+    // The "Except" rule overrides pass limit, so we allow 0.
+    if (allowedBids.length === 0 && isDealer && exceptBid === 1 && restrictPass) {
+       allowedBids = [0];
+    }
+
+    return allowedBids;
+  }
+
+  public placeBid(playerId: string, bid: number): boolean {
+    if (this.state !== GameState.BIDDING) return false;
+    
+    const pIndex = this.players.findIndex(p => p.id === playerId);
+    if (pIndex !== this.currentPlayerIndex) return false;
+
+    const allowedBids = this.getAvailableBids(pIndex);
+    if (!allowedBids.includes(bid)) return false;
+
+    this.players[pIndex].currentBid = bid;
+
+    // Advance turn or transition to playing tricks
+    if (pIndex === this.dealerIndex) {
+      this.transitionTo(GameState.PLAYING_TRICKS);
+    } else {
+      this.advanceTurn();
+    }
+
+    return true;
   }
 }

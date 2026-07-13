@@ -3,11 +3,11 @@ import { Card, Suit, Rank } from './Card';
 export class Deck {
   public cards: Card[] = [];
 
-  constructor() {
+  public constructor() {
     this.generateDeck();
   }
 
-  private generateDeck() {
+  private generateDeck(): void {
     this.cards = [];
     for (const suit of Object.values(Suit)) {
       for (const rank of Object.values(Rank)) {
@@ -16,22 +16,24 @@ export class Deck {
     }
   }
 
-  public shuffle() {
-    for (let i = this.cards.length - 1; i > 0; i--) {
+  public shuffle(): void {
+    for (let i = this.cards.length - 1; i > 0; i -= 1) {
       const j = Math.floor(Math.random() * (i + 1));
       [this.cards[i], this.cards[j]] = [this.cards[j], this.cards[i]];
     }
   }
 
   /**
-   * Generates and shuffles a deck, ensuring that the Joker (7 of Spades)
-   * is not the last card in the deck (which is used as the trump card indicator).
+   * Fresh 36-card deck, shuffled.
+   * Optional: ensure card at `notJokerFromEnd` (0 = last index) is not the joker.
+   * Used when the trump is determined by a specific deal position.
    */
-  public generateAndShuffleDeck(): Card[] {
+  public generateAndShuffleDeck(options?: { notJokerFromEnd?: number }): Card[] {
+    const fromEnd = options?.notJokerFromEnd ?? 0;
     do {
       this.generateDeck();
       this.shuffle();
-    } while (this.cards[this.cards.length - 1].isJoker);
+    } while (this.cards[this.cards.length - 1 - fromEnd]?.isJoker);
 
     return this.cards;
   }

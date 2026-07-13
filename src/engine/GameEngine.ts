@@ -20,10 +20,14 @@ export interface Player {
   score: number;
   currentBid: number | null;
   tricksTaken: number;
+  /** Consecutive rounds this player bid 0 (pass). Reset on any non-zero bid. */
+  consecutivePassRounds: number;
 }
 
 export type JokerAction =
-  { type: 'TAKE' } | { type: 'DEMAND_SUIT'; suit: Suit } | { type: 'DROP'; suit?: Suit };
+  | { type: 'TAKE' }
+  | { type: 'DEMAND_SUIT'; suit: Suit }
+  | { type: 'DROP'; suit?: Suit };
 
 export interface PlayedCard {
   playerId: string;
@@ -40,6 +44,25 @@ export interface RoundScoreRecord {
   tricks: Record<string, number>;
 }
 
+export interface LegalPlay {
+  cardIndex: number;
+  jokerActions?: JokerAction[];
+}
+
+export interface EngineActionResult {
+  ok: boolean;
+  error?: string;
+  events: string[];
+}
+
+export interface PlayerRanking {
+  playerId: string;
+  name: string;
+  score: number;
+  place: number;
+  zeroScoreSecond: boolean;
+}
+
 export class GameEngine {
   public state: GameState = GameState.WAITING_PLAYERS;
   public players: Player[] = [];
@@ -48,6 +71,8 @@ export class GameEngine {
   public currentPlayerIndex = 0;
   public deck: Deck;
   public trumpSuit: Suit | null = null;
+  /** Last dealt card shown as trump indicator (null in no-trump / empty deal edge). */
+  public trumpCard: Card | null = null;
   public tableCards: PlayedCard[] = [];
   public currentTrickLeadSuit: Suit | null = null;
   public currentRoundCards = 1;
@@ -61,6 +86,10 @@ export class GameEngine {
 
   public controlGameChooserId: string | null = null;
   public controlGamesPlayed = 0;
+  public ranking: PlayerRanking[] = [];
+
+  /** Safety cap for control-game tie-breaks */
+  public maxControlGames = 20;
 
   public constructor(maxPlayers: number = 3) {
     this.maxPlayers = maxPlayers;
@@ -85,7 +114,9 @@ export class GameEngine {
       score: 0,
       currentBid: null,
       tricksTaken: 0,
+      consecutivePassRounds: 0,
     });
+    // Stay in WAITING_PLAYERS until explicit startGame (no auto-deal deadlock)
     return true;
   }
 
@@ -109,6 +140,46 @@ export class GameEngine {
     this.plan = RoundPlanner.generatePlan(settings);
     this.currentRoundIndex = 0;
     this.scoreHistory = [];
+    this.controlGamesPlayed = 0;
+    this.ranking = [];
+    this.setupRoundFromPlan();
+    return true;
+  }
+
+  /**
+   * Short plan for smoke/CI (not full ladder). Still exercises control flow.
+   */
+  public startShortGame(settings: PlannerSettings, standardRounds = 2): boolean {
+    if (this.state !== GameState.WAITING_PLAYERS) {
+      return false;
+    }
+    if (!settings || settings.playersCount !== this.maxPlayers) {
+      return false;
+    }
+    if (this.players.length !== settings.playersCount) {
+      return false;
+    }
+
+    const N = settings.playersCount;
+    const M = 36 / N;
+    const plan: RoundSpec[] = [];
+    let roundNumber = 1;
+    let dealer = 0;
+    for (let i = 0; i < standardRounds; i += 1) {
+      plan.push({
+        roundNumber: roundNumber++,
+        type: RoundType.STANDARD,
+        cardsInHand: Math.min(i + 1, M),
+        dealerIndex: dealer,
+      });
+      dealer = (dealer + 1) % N;
+    }
+    this.plan = plan;
+    this.currentRoundIndex = 0;
+    this.scoreHistory = [];
+    this.controlGamesPlayed = 0;
+    this.ranking = [];
+    this.playedRoundTypes = new Set();
     this.setupRoundFromPlan();
     return true;
   }
@@ -158,6 +229,7 @@ export class GameEngine {
         this.determineControlGameChooser();
         break;
       case GameState.MATCH_FINISHED:
+        this.ranking = this.computeRanking();
         break;
     }
   }
@@ -177,6 +249,13 @@ export class GameEngine {
       bids[player.id] = player.currentBid;
       tricks[player.id] = player.tricksTaken;
       player.score += score;
+
+      // Track consecutive pass rounds (only for rounds with bidding)
+      if (player.currentBid === 0) {
+        player.consecutivePassRounds += 1;
+      } else if (player.currentBid !== null && player.currentBid > 0) {
+        player.consecutivePassRounds = 0;
+      }
     }
     this.scoreHistory.push({
       roundNumber: this.scoreHistory.length + 1,
@@ -191,6 +270,11 @@ export class GameEngine {
   private checkControlGameOrFinish(): void {
     if (this.controlGamesPlayed === 0) {
       this.transitionTo(GameState.CONTROL_GAME_SETUP);
+      return;
+    }
+
+    if (this.controlGamesPlayed >= this.maxControlGames) {
+      this.transitionTo(GameState.MATCH_FINISHED);
       return;
     }
 
@@ -228,7 +312,9 @@ export class GameEngine {
     }
 
     this.currentRoundType = type;
-    this.currentRoundCards = 36 / this.players.length;
+    // Percents control: always 4 cards; otherwise max hand M
+    this.currentRoundCards =
+      type === RoundType.PERCENTS ? 4 : 36 / this.players.length;
     this.dealerIndex = newDealerIndex;
     this.isDarkRound = type === RoundType.DARK;
     this.controlGamesPlayed += 1;
@@ -250,25 +336,43 @@ export class GameEngine {
     }
     this.tableCards = [];
     this.currentTrickLeadSuit = null;
-    this.deck.generateAndShuffleDeck();
+    this.trumpCard = null;
+    this.trumpSuit = null;
 
     const cardsToDeal = this.currentRoundCards;
-    for (let cardIndex = 0; cardIndex < cardsToDeal; cardIndex += 1) {
-      for (const player of this.players) {
+    const totalDeal = cardsToDeal * this.players.length;
+    // Trump is the last card dealt (to dealer). It is the totalDeal-th pop from end of deck.
+    // Index of that card before dealing: cards[length - totalDeal] after shuffle... 
+    // With pop from end: last pop is at original index (length - totalDeal).
+    // notJokerFromEnd = totalDeal - 1 means the totalDeal-th card from the end is not joker.
+    const notJokerFromEnd = Math.max(0, totalDeal - 1);
+
+    if (this.currentRoundType === RoundType.NO_TRUMP) {
+      this.deck.generateAndShuffleDeck();
+    } else {
+      this.deck.generateAndShuffleDeck({ notJokerFromEnd });
+    }
+
+    // Deal one-by-one starting left of dealer, ending with dealer each ring
+    const firstReceiver = this.getNextPlayerIndex(this.dealerIndex);
+    let lastDealt: Card | null = null;
+    for (let cardNum = 0; cardNum < cardsToDeal; cardNum += 1) {
+      for (let offset = 0; offset < this.players.length; offset += 1) {
+        const playerIndex = (firstReceiver + offset) % this.players.length;
         const card = this.deck.cards.pop();
         if (card) {
-          player.cards.push(card);
+          this.players[playerIndex].cards.push(card);
+          lastDealt = card;
         }
       }
     }
 
     if (this.currentRoundType === RoundType.NO_TRUMP) {
       this.trumpSuit = null;
-    } else if (this.deck.cards.length > 0) {
-      const trumpCard = this.deck.cards[this.deck.cards.length - 1];
-      this.trumpSuit = trumpCard.suit;
-    } else {
-      this.trumpSuit = null;
+      this.trumpCard = null;
+    } else if (lastDealt) {
+      this.trumpCard = lastDealt;
+      this.trumpSuit = lastDealt.suit;
     }
 
     this.transitionTo(GameState.BIDDING);
@@ -280,8 +384,31 @@ export class GameEngine {
     }
   }
 
+  /** Max consecutive pass rounds allowed before forced non-zero bid (N-1). */
+  private getMaxConsecutivePasses(): number {
+    return this.maxPlayers - 1;
+  }
+
   public getAvailableBids(playerIndex: number): number[] {
+    return this.getLegalBidsByIndex(playerIndex);
+  }
+
+  public getLegalBids(playerId: string): number[] {
+    const playerIndex = this.players.findIndex((player) => player.id === playerId);
+    if (playerIndex < 0) {
+      return [];
+    }
+    return this.getLegalBidsByIndex(playerIndex);
+  }
+
+  private getLegalBidsByIndex(playerIndex: number): number[] {
+    if (this.state !== GameState.BIDDING) {
+      return [];
+    }
     if (playerIndex < 0 || playerIndex >= this.players.length) {
+      return [];
+    }
+    if (playerIndex !== this.currentPlayerIndex) {
       return [];
     }
 
@@ -291,19 +418,9 @@ export class GameEngine {
       allowedBids.push(bid);
     }
 
-    let currentPasses = 0;
-    let checkIndex = this.getNextPlayerIndex(this.dealerIndex);
-    while (checkIndex !== playerIndex) {
-      if (this.players[checkIndex].currentBid === 0) {
-        currentPasses += 1;
-      } else {
-        currentPasses = 0;
-      }
-      checkIndex = this.getNextPlayerIndex(checkIndex);
-    }
-
-    const consecutivePassesAllowed = this.maxPlayers === 3 ? 2 : this.maxPlayers === 4 ? 3 : 4;
-    const restrictPass = currentPasses >= consecutivePassesAllowed;
+    const player = this.players[playerIndex];
+    // Per-player history across rounds (ТЗ §3)
+    const restrictPass = player.consecutivePassRounds >= this.getMaxConsecutivePasses();
     if (restrictPass) {
       allowedBids = allowedBids.filter((bid) => bid !== 0);
     }
@@ -311,44 +428,30 @@ export class GameEngine {
     const isDealer = playerIndex === this.dealerIndex;
     let exceptBid: number | null = null;
     if (isDealer) {
-      const sumBids = this.players.reduce((sum, player) => sum + (player.currentBid ?? 0), 0);
+      const sumBids = this.players.reduce((sum, p) => sum + (p.currentBid ?? 0), 0);
       exceptBid = maxBid - sumBids;
+      if (exceptBid >= 0 && exceptBid <= maxBid) {
+        allowedBids = allowedBids.filter((bid) => bid !== exceptBid);
+      }
     }
 
-    if (isDealer && exceptBid !== null) {
-      allowedBids = allowedBids.filter((bid) => bid !== exceptBid);
-    }
-    if (allowedBids.length === 0 && isDealer && exceptBid === 1 && restrictPass) {
+    // Collision: «Кроме» has priority over pass limit → allow 0
+    if (allowedBids.length === 0 && isDealer && restrictPass && exceptBid === 1 && maxBid === 1) {
       allowedBids = [0];
     }
+
     return allowedBids;
   }
 
   public placeBid(playerId: string, bid: number): boolean {
-    if (this.state !== GameState.BIDDING) {
-      return false;
-    }
-
-    const playerIndex = this.players.findIndex((player) => player.id === playerId);
-    if (playerIndex !== this.currentPlayerIndex) {
-      return false;
-    }
-
-    const allowedBids = this.getAvailableBids(playerIndex);
-    if (!allowedBids.includes(bid)) {
-      return false;
-    }
-
-    this.players[playerIndex].currentBid = bid;
-    if (playerIndex === this.dealerIndex) {
-      this.transitionTo(GameState.PLAYING_TRICKS);
-    } else {
-      this.advanceTurn();
-    }
-    return true;
+    return this.applyAction({ type: 'PLACE_BID', playerId, bid }).ok;
   }
 
   public getValidCardIndices(playerId: string): number[] {
+    return this.getLegalPlays(playerId).map((play) => play.cardIndex);
+  }
+
+  public getLegalPlays(playerId: string): LegalPlay[] {
     if (this.state !== GameState.PLAYING_TRICKS) {
       return [];
     }
@@ -359,9 +462,68 @@ export class GameEngine {
     }
 
     const player = this.players[playerIndex];
+    const indices = this.computeLegalCardIndices(player);
+    return indices.map((cardIndex) => {
+      const card = player.cards[cardIndex];
+      if (!card.isJoker) {
+        return { cardIndex };
+      }
+      return {
+        cardIndex,
+        jokerActions: this.getLegalJokerActions(),
+      };
+    });
+  }
+
+  private getActiveDemandSuit(): Suit | null {
+    const lead = this.tableCards[0];
+    if (!lead?.card.isJoker) {
+      return null;
+    }
+    if (lead.jokerAction?.type === 'DEMAND_SUIT') {
+      return lead.jokerAction.suit;
+    }
+    return null;
+  }
+
+  private computeLegalCardIndices(player: Player): number[] {
     const allIndices = player.cards.map((_card, cardIndex) => cardIndex);
+    if (this.tableCards.length === 0) {
+      return allIndices;
+    }
+
+    const demandSuit = this.getActiveDemandSuit();
+    if (demandSuit !== null) {
+      // «По старшим [масть]»: highest of demand suit, else highest trump, else any
+      const demandCards = player.cards
+        .map((card, index) => ({ card, index }))
+        .filter(({ card }) => !card.isJoker && card.suit === demandSuit);
+      if (demandCards.length > 0) {
+        const maxRank = Math.max(...demandCards.map(({ card }) => this.getRankValue(card.rank)));
+        return demandCards
+          .filter(({ card }) => this.getRankValue(card.rank) === maxRank)
+          .map(({ index }) => index);
+      }
+
+      if (this.trumpSuit !== null) {
+        const trumps = player.cards
+          .map((card, index) => ({ card, index }))
+          .filter(({ card }) => !card.isJoker && card.suit === this.trumpSuit);
+        if (trumps.length > 0) {
+          const maxRank = Math.max(...trumps.map(({ card }) => this.getRankValue(card.rank)));
+          return trumps
+            .filter(({ card }) => this.getRankValue(card.rank) === maxRank)
+            .map(({ index }) => index);
+        }
+      }
+
+      // May still play joker or any card
+      return allIndices;
+    }
+
     const leadSuit = this.currentTrickLeadSuit;
-    if (this.tableCards.length === 0 || leadSuit === null) {
+    if (leadSuit === null) {
+      // Joker TAKE lead — no forced suit
       return allIndices;
     }
 
@@ -385,56 +547,128 @@ export class GameEngine {
     return allIndices;
   }
 
+  private getLegalJokerActions(): JokerAction[] {
+    if (this.tableCards.length === 0) {
+      const suits = [Suit.Spades, Suit.Hearts, Suit.Diamonds, Suit.Clubs];
+      return [
+        { type: 'TAKE' },
+        ...suits.map((suit) => ({ type: 'DEMAND_SUIT' as const, suit })),
+        ...suits.map((suit) => ({ type: 'DROP' as const, suit })),
+      ];
+    }
+    return [{ type: 'TAKE' }, { type: 'DROP' }];
+  }
+
   public playCard(playerId: string, cardIndex: number, jokerAction?: JokerAction): boolean {
-    if (!Number.isInteger(cardIndex)) {
-      return false;
-    }
+    return this.applyAction({ type: 'PLAY_CARD', playerId, cardIndex, jokerAction }).ok;
+  }
 
-    const playerIndex = this.players.findIndex((player) => player.id === playerId);
-    if (playerIndex !== this.currentPlayerIndex) {
-      return false;
-    }
+  public applyAction(
+    action:
+      | { type: 'PLACE_BID'; playerId: string; bid: number }
+      | { type: 'PLAY_CARD'; playerId: string; cardIndex: number; jokerAction?: JokerAction }
+      | { type: 'SETUP_CONTROL'; playerId: string; roundType: RoundType; dealerIndex: number },
+  ): EngineActionResult {
+    const events: string[] = [];
 
-    const validCardIndices = this.getValidCardIndices(playerId);
-    if (!validCardIndices.includes(cardIndex)) {
-      return false;
-    }
-
-    const player = this.players[playerIndex];
-    const card = player.cards[cardIndex];
-    if (card.isJoker && !this.isValidJokerAction(jokerAction)) {
-      return false;
-    }
-    if (
-      card.isJoker
-      && this.tableCards.length === 0
-      && jokerAction?.type === 'DROP'
-      && !jokerAction.suit
-    ) {
-      return false;
-    }
-    if (card.isJoker && this.tableCards.length > 0 && jokerAction?.type === 'DEMAND_SUIT') {
-      return false;
-    }
-
-    player.cards.splice(cardIndex, 1);
-    this.tableCards.push({ playerId, card, jokerAction });
-    if (this.tableCards.length === 1) {
-      if (card.isJoker && (jokerAction?.type === 'DEMAND_SUIT' || jokerAction?.type === 'DROP')) {
-        this.currentTrickLeadSuit = jokerAction.suit ?? null;
-      } else if (card.isJoker) {
-        this.currentTrickLeadSuit = null;
-      } else {
-        this.currentTrickLeadSuit = card.suit;
+    if (action.type === 'PLACE_BID') {
+      if (this.state !== GameState.BIDDING) {
+        return { ok: false, error: 'Not in bidding phase', events };
       }
+      const playerIndex = this.players.findIndex((player) => player.id === action.playerId);
+      if (playerIndex !== this.currentPlayerIndex) {
+        return { ok: false, error: 'Not your turn', events };
+      }
+      if (!Number.isInteger(action.bid)) {
+        return { ok: false, error: 'Bid must be an integer', events };
+      }
+      const allowed = this.getLegalBidsByIndex(playerIndex);
+      if (!allowed.includes(action.bid)) {
+        return { ok: false, error: 'Illegal bid', events };
+      }
+
+      this.players[playerIndex].currentBid = action.bid;
+      events.push('BID_PLACED');
+      if (playerIndex === this.dealerIndex) {
+        this.transitionTo(GameState.PLAYING_TRICKS);
+        events.push('BIDDING_COMPLETE');
+      } else {
+        this.advanceTurn();
+      }
+      return { ok: true, events };
     }
 
-    if (this.tableCards.length === this.players.length) {
-      this.resolveTrick();
-    } else {
-      this.advanceTurn();
+    if (action.type === 'PLAY_CARD') {
+      if (this.state !== GameState.PLAYING_TRICKS) {
+        return { ok: false, error: 'Not in playing phase', events };
+      }
+      if (!Number.isInteger(action.cardIndex)) {
+        return { ok: false, error: 'Invalid card index', events };
+      }
+
+      const playerIndex = this.players.findIndex((player) => player.id === action.playerId);
+      if (playerIndex !== this.currentPlayerIndex) {
+        return { ok: false, error: 'Not your turn', events };
+      }
+
+      const legal = this.getLegalPlays(action.playerId);
+      const match = legal.find((play) => play.cardIndex === action.cardIndex);
+      if (!match) {
+        return { ok: false, error: 'Illegal card', events };
+      }
+
+      const player = this.players[playerIndex];
+      const card = player.cards[action.cardIndex];
+      let jokerAction = action.jokerAction;
+      if (card.isJoker) {
+        if (!this.isValidJokerAction(jokerAction)) {
+          return { ok: false, error: 'Joker action required', events };
+        }
+        if (
+          this.tableCards.length === 0
+          && jokerAction?.type === 'DROP'
+          && !jokerAction.suit
+        ) {
+          return { ok: false, error: 'DROP lead requires suit', events };
+        }
+        if (this.tableCards.length > 0 && jokerAction?.type === 'DEMAND_SUIT') {
+          return { ok: false, error: 'Cannot DEMAND_SUIT when not leading', events };
+        }
+      } else {
+        jokerAction = undefined;
+      }
+
+      player.cards.splice(action.cardIndex, 1);
+      this.tableCards.push({ playerId: action.playerId, card, jokerAction });
+      events.push('CARD_PLAYED');
+
+      if (this.tableCards.length === 1) {
+        if (card.isJoker && (jokerAction?.type === 'DEMAND_SUIT' || jokerAction?.type === 'DROP')) {
+          this.currentTrickLeadSuit = jokerAction.suit ?? null;
+        } else if (card.isJoker) {
+          this.currentTrickLeadSuit = null;
+        } else {
+          this.currentTrickLeadSuit = card.suit;
+        }
+      }
+
+      if (this.tableCards.length === this.players.length) {
+        this.resolveTrick();
+        events.push('TRICK_RESOLVED');
+      } else {
+        this.advanceTurn();
+      }
+      return { ok: true, events };
     }
-    return true;
+
+    if (action.type === 'SETUP_CONTROL') {
+      const ok = this.setupControlGame(action.playerId, action.roundType, action.dealerIndex);
+      return ok
+        ? { ok: true, events: ['CONTROL_SETUP'] }
+        : { ok: false, error: 'Invalid control setup', events };
+    }
+
+    return { ok: false, error: 'Unknown action', events };
   }
 
   private isValidJokerAction(jokerAction: JokerAction | undefined): jokerAction is JokerAction {
@@ -514,9 +748,53 @@ export class GameEngine {
     this.currentPlayerIndex = this.players.findIndex((player) => player.id === winnerId);
     this.tableCards = [];
     this.currentTrickLeadSuit = null;
-    if (this.players[0].cards.length === 0) {
+    if (this.players.every((player) => player.cards.length === 0)) {
       this.transitionTo(GameState.SCORING);
     }
+  }
+
+  /**
+   * Ranking with «правило нулевого счёта»: score === 0 → place 2.
+   */
+  public computeRanking(): PlayerRanking[] {
+    const zeroPlayers = this.players.filter((player) => player.score === 0);
+    const nonZero = this.players.filter((player) => player.score !== 0);
+    nonZero.sort((a, b) => b.score - a.score);
+
+    const result: PlayerRanking[] = [];
+    let nextPlace = 1;
+
+    for (const player of nonZero) {
+      if (nextPlace === 2 && zeroPlayers.length > 0) {
+        // Reserve place 2 for zero-score players
+        nextPlace = 3;
+      }
+      const sameScorePlace = result.find((entry) => entry.score === player.score)?.place;
+      const place = sameScorePlace ?? nextPlace;
+      result.push({
+        playerId: player.id,
+        name: player.name,
+        score: player.score,
+        place,
+        zeroScoreSecond: false,
+      });
+      if (sameScorePlace === undefined) {
+        nextPlace = place + 1;
+      }
+    }
+
+    for (const player of zeroPlayers) {
+      result.push({
+        playerId: player.id,
+        name: player.name,
+        score: 0,
+        place: 2,
+        zeroScoreSecond: true,
+      });
+    }
+
+    result.sort((a, b) => a.place - b.place || b.score - a.score);
+    return result;
   }
 
   private getRankValue(rank: Rank): number {

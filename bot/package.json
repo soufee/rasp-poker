@@ -1,0 +1,23 @@
+{
+  "name": "rasp-poker-bot-grok",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Grok — strong network bot for Расписной покер (issue #22)",
+  "type": "commonjs",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "test": "tsx --test test/**/*.test.ts",
+    "smoke": "tsx src/index.ts --smoke"
+  },
+  "dependencies": {
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.23.1",
+    "typescript": "^5.8.3"
+  }
+}

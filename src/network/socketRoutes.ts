@@ -9,6 +9,8 @@ interface RoomSocketRoute {
   };
   Querystring: {
     token?: string;
+    userId?: string;
+    userName?: string;
   };
 }
 
@@ -71,8 +73,8 @@ function getTokenIdentity(
 
 /**
  * Resolve identity for WS join.
- * - Production: JWT required (userId only from token — no query spoof)
- * - Local: JWT preferred; else auto local superuser `dev`
+ * Priority: JWT token → guest query (userId/userName, for bots/clients) → local dev superuser.
+ * Guest ids are stable and required for multi-bot tables (issue #22).
  */
 async function resolveIdentity(
   fastify: FastifyInstance,
@@ -81,6 +83,12 @@ async function resolveIdentity(
   const tokenIdentity = getTokenIdentity(fastify, query.token);
   if (tokenIdentity) {
     return tokenIdentity;
+  }
+
+  const guestId = getNonEmptyString(query.userId);
+  const guestName = getNonEmptyString(query.userName);
+  if (guestId && guestName) {
+    return { userId: guestId, userName: guestName };
   }
 
   if (isLocal) {
@@ -100,7 +108,7 @@ export async function socketRoutes(fastify: FastifyInstance): Promise<void> {
       socket.send(
         JSON.stringify({
           type: 'ERROR',
-          message: 'Unauthorized: valid JWT token required (?token=...)',
+          message: 'Unauthorized: provide JWT (?token=) or guest userId+userName',
           code: 'WS_UNAUTHORIZED',
         }),
       );

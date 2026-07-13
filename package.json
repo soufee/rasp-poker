@@ -23,6 +23,8 @@
     "db:migrate:dev": "prisma migrate dev",
     "db:studio": "prisma studio",
     "smoke:bots": "tsx scripts/smoke-bots.ts",
+    "bot:grok": "npm --prefix bot start --",
+    "bot:smoke": "npm --prefix bot run smoke",
     "mail:test": "tsx scripts/send-test-mail.ts",
     "postinstall": "prisma generate"
   },

@@ -1,4 +1,6 @@
 import { FastifyPluginAsync } from 'fastify';
+import { authenticate, requireVerification, AuthUser } from '../auth/middleware';
+import { isLocal } from '../config/env';
 import {
   CreateRoomInput,
   PlayerLimit,
@@ -13,8 +15,8 @@ interface CreateRoomBody {
   hasLadder?: unknown;
   hasMiser?: unknown;
   isPrivate?: unknown;
-  ownerId?: unknown;
-  ownerName?: unknown;
+  /** Training / bot-only table — unverified users allowed in production */
+  isTraining?: unknown;
 }
 
 interface CreateRoomRoute {
@@ -29,7 +31,10 @@ function isPlayerLimit(value: unknown): value is PlayerLimit {
   return value === 3 || value === 4 || value === 6;
 }
 
-function parseCreateRoomInput(value: unknown): CreateRoomInput | null {
+function parseCreateRoomBody(
+  value: unknown,
+  owner: AuthUser,
+): (CreateRoomInput & { isTraining: boolean }) | null {
   if (!isRecord(value)) {
     return null;
   }
@@ -40,8 +45,7 @@ function parseCreateRoomInput(value: unknown): CreateRoomInput | null {
     || typeof body.hasLadder !== 'boolean'
     || typeof body.hasMiser !== 'boolean'
     || (body.isPrivate !== undefined && typeof body.isPrivate !== 'boolean')
-    || typeof body.ownerId !== 'string'
-    || typeof body.ownerName !== 'string'
+    || (body.isTraining !== undefined && typeof body.isTraining !== 'boolean')
   ) {
     return null;
   }
@@ -56,33 +60,58 @@ function parseCreateRoomInput(value: unknown): CreateRoomInput | null {
     hasLadder: body.hasLadder,
     hasMiser: body.hasMiser,
     isPrivate: body.isPrivate,
-    ownerId: body.ownerId,
-    ownerName: body.ownerName,
+    ownerId: owner.id,
+    ownerName: owner.displayName || owner.email || 'Player',
+    isTraining: body.isTraining === true,
   };
 }
 
 export const lobbyRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get('/api/rooms', async () => roomManager.listRooms());
 
-  fastify.post<CreateRoomRoute>('/api/rooms', async (request, reply) => {
-    const input = parseCreateRoomInput(request.body);
-    if (!input) {
-      return reply.status(400).send({
-        error: 'Укажите название, владельца, настройки и количество игроков 3, 4 или 6.',
-      });
-    }
-
-    try {
-      const room = roomManager.createRoom(input);
-      return reply.status(201).send({ room });
-    } catch (error) {
-      if (error instanceof RoomManagerError) {
-        const statusCode = error.code === 'ROOM_ALREADY_EXISTS' ? 409 : 400;
-        return reply.status(statusCode).send({ error: error.message });
+  fastify.post<CreateRoomRoute>(
+    '/api/rooms',
+    {
+      preHandler: [
+        authenticate,
+        async (request, reply) => {
+          // Ranked (default) requires verification; training skips
+          const body = request.body as CreateRoomBody | undefined;
+          const isTraining = body?.isTraining === true;
+          if (!isTraining && !isLocal) {
+            await requireVerification(request, reply);
+          }
+        },
+      ],
+    },
+    async (request, reply) => {
+      if (reply.sent) {
+        return;
       }
-      throw error;
-    }
-  });
+      const user = request.user as AuthUser;
+      const input = parseCreateRoomBody(request.body, user);
+      if (!input) {
+        return reply.status(400).send({
+          error: 'Укажите название, настройки и количество игроков 3, 4 или 6.',
+        });
+      }
+
+      try {
+        const room = roomManager.createRoom(input);
+        return reply.status(201).send({
+          room,
+          isTraining: input.isTraining,
+          rankedPlay: !input.isTraining,
+        });
+      } catch (error) {
+        if (error instanceof RoomManagerError) {
+          const statusCode = error.code === 'ROOM_ALREADY_EXISTS' ? 409 : 400;
+          return reply.status(statusCode).send({ error: error.message });
+        }
+        throw error;
+      }
+    },
+  );
 };
 
 export default lobbyRoutes;

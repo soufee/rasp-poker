@@ -8,6 +8,8 @@ import { authenticate, AuthUser } from './middleware';
 import { config, isLocal, isProduction } from '../config/env';
 import { getLocalDevUser } from '../db/seedLocal';
 
+const MIN_PASSWORD_LENGTH = 8;
+
 function signUserToken(
   fastify: FastifyInstance,
   user: {
@@ -16,6 +18,7 @@ function signUserToken(
     verified: boolean;
     role?: string;
     displayName?: string;
+    tokenVersion?: number;
   },
 ) {
   return fastify.jwt.sign({
@@ -24,27 +27,32 @@ function signUserToken(
     verified: user.verified,
     role: user.role,
     displayName: user.displayName,
+    tokenVersion: user.tokenVersion ?? 0,
   });
 }
 
+function validatePassword(password: string): string | null {
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    return `Password must be at least ${MIN_PASSWORD_LENGTH} characters`;
+  }
+  return null;
+}
+
 const authRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
-  /**
-   * Session bootstrap.
-   * - local: always returns superuser `dev` + JWT (auto-login)
-   * - production: requires Authorization Bearer JWT
-   */
   fastify.get('/session', async (request, reply) => {
     if (isLocal) {
       const dev = await getLocalDevUser();
       if (!dev) {
         return reply.status(500).send({ error: 'Local superuser not seeded' });
       }
+      const dbUser = await prisma.user.findUnique({ where: { id: dev.id } });
       const token = signUserToken(fastify, {
         id: dev.id,
         email: dev.email,
         verified: true,
         role: dev.role,
         displayName: dev.displayName,
+        tokenVersion: dbUser?.tokenVersion ?? 0,
       });
       return {
         mode: 'local',
@@ -80,7 +88,6 @@ const authRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
     };
   });
 
-  // Explicit alias for local auto-login
   fastify.get('/dev-login', async (_request, reply) => {
     if (!isLocal) {
       return reply.status(404).send({ error: 'Not available in production' });
@@ -89,12 +96,14 @@ const authRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
     if (!dev) {
       return reply.status(500).send({ error: 'Local superuser not seeded' });
     }
+    const dbUser = await prisma.user.findUnique({ where: { id: dev.id } });
     const token = signUserToken(fastify, {
       id: dev.id,
       email: dev.email,
       verified: true,
       role: dev.role,
       displayName: dev.displayName,
+      tokenVersion: dbUser?.tokenVersion ?? 0,
     });
     return {
       mode: 'local',
@@ -126,6 +135,10 @@ const authRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
     if (!email || !password) {
       return reply.status(400).send({ error: 'Email and password are required' });
     }
+    const passwordError = validatePassword(password);
+    if (passwordError) {
+      return reply.status(400).send({ error: passwordError });
+    }
 
     const existingUser = await prisma.user.findUnique({ where: { email } });
     if (existingUser) {
@@ -146,7 +159,11 @@ const authRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
     await redis.set(`verify:${token}`, user.id, 'EX', 86400);
     await sendVerificationEmail(email, token);
 
-    return reply.status(201).send({ message: 'User registered. Please verify your email.' });
+    return reply.status(201).send({
+      message: 'User registered. Please verify your email.',
+      // Ranked play blocked until verified; training with bots is allowed.
+      rankedPlayAllowed: false,
+    });
   });
 
   fastify.get('/verify', async (request, reply) => {
@@ -169,20 +186,21 @@ const authRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
     });
     await redis.del(`verify:${token}`);
 
-    return reply.send({ message: 'Email verified successfully' });
+    return reply.send({ message: 'Email verified successfully', rankedPlayAllowed: true });
   });
 
   fastify.post('/login', async (request, reply) => {
-    // Local: still allow password login, but prefer /session
     if (isLocal) {
       const dev = await getLocalDevUser();
       if (dev) {
+        const dbUser = await prisma.user.findUnique({ where: { id: dev.id } });
         const token = signUserToken(fastify, {
           id: dev.id,
           email: dev.email,
           verified: true,
           role: dev.role,
           displayName: dev.displayName,
+          tokenVersion: dbUser?.tokenVersion ?? 0,
         });
         return {
           token,
@@ -213,6 +231,7 @@ const authRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
       verified: user.verified,
       role: user.role,
       displayName: user.displayName,
+      tokenVersion: user.tokenVersion,
     });
     return {
       token,
@@ -223,6 +242,7 @@ const authRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
         role: user.role,
         verified: user.verified,
       },
+      rankedPlayAllowed: user.verified,
     };
   });
 
@@ -254,6 +274,10 @@ const authRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
     if (!token || !newPassword) {
       return reply.status(400).send({ error: 'Token and new password are required' });
     }
+    const passwordError = validatePassword(newPassword);
+    if (passwordError) {
+      return reply.status(400).send({ error: passwordError });
+    }
 
     const redis = getRedis();
     const userId = await redis.get(`reset:${token}`);
@@ -262,13 +286,19 @@ const authRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
     }
 
     const hashedPassword = await bcrypt.hash(newPassword, 10);
+    // Increment tokenVersion → all prior JWTs become invalid
     await prisma.user.update({
       where: { id: userId },
-      data: { password: hashedPassword },
+      data: {
+        password: hashedPassword,
+        tokenVersion: { increment: 1 },
+      },
     });
     await redis.del(`reset:${token}`);
 
-    return reply.send({ message: 'Password has been reset' });
+    return reply.send({
+      message: 'Password has been reset. Please log in again on all devices.',
+    });
   });
 
   fastify.get('/me', { preHandler: [authenticate] }, async (request) => {
@@ -279,12 +309,12 @@ const authRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
       displayName: u.displayName,
       role: u.role,
       verified: u.verified,
+      rankedPlayAllowed: isLocal || u.verified === true,
       mode: isProduction ? 'production' : 'local',
       authRequired: isProduction,
     };
   });
 
-  // Health of auth config (no secrets)
   fastify.get('/mode', async () => ({
     appEnv: config.appEnv,
     authRequired: isProduction,

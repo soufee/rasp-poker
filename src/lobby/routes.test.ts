@@ -1,15 +1,17 @@
 import fastify, { FastifyInstance } from 'fastify';
+import fastifyJwt from '@fastify/jwt';
 import lobbyRoutes from './routes';
 
 async function createServer(): Promise<FastifyInstance> {
   const server = fastify();
+  server.register(fastifyJwt, { secret: 'test-secret' });
   server.register(lobbyRoutes);
   await server.ready();
   return server;
 }
 
 describe('lobby routes', () => {
-  it('lists rooms and creates a room', async () => {
+  it('lists rooms and creates a room (owner from auth, not body)', async () => {
     const server = await createServer();
     const listResponse = await server.inject({
       method: 'GET',
@@ -27,8 +29,6 @@ describe('lobby routes', () => {
         maxPlayers: 4,
         hasLadder: true,
         hasMiser: false,
-        ownerId: 'owner-route',
-        ownerName: 'Владелец',
       },
     });
     expect(createResponse.statusCode).toBe(201);
@@ -39,11 +39,10 @@ describe('lobby routes', () => {
         ownerId: string;
       };
     };
-    expect(created.room).toMatchObject({
-      name: 'Новая комната',
-      maxPlayers: 4,
-      ownerId: 'owner-route',
-    });
+    expect(created.room.name).toBe('Новая комната');
+    expect(created.room.maxPlayers).toBe(4);
+    expect(typeof created.room.ownerId).toBe('string');
+    expect(created.room.ownerId.length).toBeGreaterThan(0);
     await server.close();
   });
 
@@ -57,8 +56,6 @@ describe('lobby routes', () => {
         maxPlayers: 5,
         hasLadder: true,
         hasMiser: true,
-        ownerId: 'owner-invalid',
-        ownerName: 'Владелец',
       },
     });
     expect(invalidResponse.statusCode).toBe(400);
@@ -72,8 +69,6 @@ describe('lobby routes', () => {
         maxPlayers: 3,
         hasLadder: true,
         hasMiser: true,
-        ownerId: 'owner-conflict',
-        ownerName: 'Владелец',
       },
     });
     expect(conflictResponse.statusCode).toBe(409);

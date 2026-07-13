@@ -13,15 +13,17 @@ enum UserRole {
 }
 
 model User {
-  id          String   @id @default(uuid())
-  email       String   @unique
-  password    String
-  displayName String   @default("Player")
-  role        UserRole @default(USER)
-  verified    Boolean  @default(false)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  rooms       Room[]
+  id           String   @id @default(uuid())
+  email        String   @unique
+  password     String
+  displayName  String   @default("Player")
+  role         UserRole @default(USER)
+  verified     Boolean  @default(false)
+  // Bumped on password reset to invalidate existing JWTs
+  tokenVersion Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  rooms        Room[]
 }
 
 model Room {

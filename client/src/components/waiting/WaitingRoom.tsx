@@ -210,6 +210,7 @@ export function WaitingRoom({
         </section>
 
         <ChatPanel
+          chatEnabled={Boolean(game?.chatEnabled)}
           currentUserId={session.user.id}
           messages={messages}
           onSend={(text) => send({ text, type: 'CHAT_SEND' })}

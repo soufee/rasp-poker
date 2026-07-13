@@ -369,6 +369,7 @@ export function GameTable({
 
       {isChatOpen ? (
         <ChatPanel
+          chatEnabled={game.chatEnabled !== false && (game.humanCount ?? 0) >= 2}
           compact
           currentUserId={session.user.id}
           messages={messages}

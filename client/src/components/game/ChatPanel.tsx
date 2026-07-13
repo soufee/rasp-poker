@@ -8,6 +8,8 @@ interface ChatPanelProps {
   onSend: (text: string) => boolean;
   onClose?: () => void;
   compact?: boolean;
+  /** Server rule: chat only when ≥2 live humans */
+  chatEnabled?: boolean;
 }
 
 const timeFormatter = new Intl.DateTimeFormat('ru-RU', {
@@ -26,6 +28,7 @@ function formatTime(value: string): string {
 }
 
 export function ChatPanel({
+  chatEnabled = true,
   compact = false,
   currentUserId,
   messages,
@@ -75,7 +78,12 @@ export function ChatPanel({
         ) : null}
       </header>
       <div className="chat-messages" ref={listRef}>
-        {messages.length === 0 ? (
+        {!chatEnabled ? (
+          <div className="chat-empty">
+            <span aria-hidden="true">♣</span>
+            <p>Чат откроется, когда за столом будет минимум двое живых игроков.</p>
+          </div>
+        ) : messages.length === 0 ? (
           <div className="chat-empty">
             <span aria-hidden="true">♣</span>
             <p>Здесь появятся сообщения игроков.</p>
@@ -105,12 +113,17 @@ export function ChatPanel({
       <form className="chat-compose" onSubmit={submit}>
         <input
           aria-label="Сообщение"
+          disabled={!chatEnabled}
           maxLength={400}
           onChange={(event) => setText(event.currentTarget.value)}
-          placeholder="Сообщение столу…"
+          placeholder={chatEnabled ? 'Сообщение столу…' : 'Чат недоступен'}
           value={text}
         />
-        <Button aria-label="Отправить сообщение" disabled={!text.trim()} type="submit">
+        <Button
+          aria-label="Отправить сообщение"
+          disabled={!chatEnabled || !text.trim()}
+          type="submit"
+        >
           ↑
         </Button>
       </form>

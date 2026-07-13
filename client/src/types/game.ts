@@ -37,6 +37,15 @@ export interface PlayerState {
   avatarUrl?: string;
   connected?: boolean;
   isReady?: boolean;
+  isBot?: boolean;
+}
+
+export interface PlayerRanking {
+  playerId: string;
+  name: string;
+  score: number;
+  place: number;
+  zeroScoreSecond: boolean;
 }
 
 export interface RoundPlanItem {
@@ -59,6 +68,10 @@ export interface GameSnapshot {
   viewerId?: string;
   hostId?: string;
   state: GamePhase;
+  stateVersion?: number;
+  turnDeadlineAt?: number | null;
+  chatEnabled?: boolean;
+  humanCount?: number;
   maxPlayers: 3 | 4 | 6;
   dealerIndex: number;
   currentPlayerIndex: number;
@@ -74,8 +87,10 @@ export interface GameSnapshot {
   playedRoundTypes?: RoundType[];
   allowedBids: number[] | null;
   validCardIndices?: number[] | null;
+  legalPlays?: Array<{ cardIndex: number; jokerActions?: JokerAction[] }>;
   players: PlayerState[];
   scoreHistory?: RoundScore[];
+  ranking?: PlayerRanking[];
 }
 
 export interface RoomSettings {

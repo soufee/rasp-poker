@@ -84,9 +84,18 @@ npm start   # migrate deploy на каждом старте
 - `npm test` — backend Jest и frontend Vitest
 - `npm run test:e2e` — browser smoke-test desktop/mobile при запущенном сервере
 - `npm run db:*` — Prisma
+- `npm run smoke:bots` — 3 бота, short match до `MATCH_FINISHED` (без UI)
 
 После `npm run build` Fastify раздаёт SPA и ассеты из `client/dist`.
 
-## Issue
+## Smoke (MVP gate)
 
-См. [#2](https://github.com/soufee/rasp-poker/issues/2) — DB + Redis + миграции.
+```bash
+# Postgres + Redis уже на localhost (см. выше)
+npm install
+npm run smoke:bots   # exit 0 если партия из 3 ботов завершилась
+npm run dev          # server :3000 + Vite client :5173
+```
+
+Клиент общается с сервером только через REST + WebSocket intent-actions (без доверия к клиентской логике карт).
+

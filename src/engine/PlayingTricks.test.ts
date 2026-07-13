@@ -9,6 +9,7 @@ describe('Playing Tricks and Joker Rules', () => {
     engine.addPlayer('p3', 'Player 3');
     engine.state = GameState.PLAYING_TRICKS;
     engine.currentPlayerIndex = 0;
+    engine.players.forEach(p => p.currentBid = 0);
 
     engine.players[0].cards = [new Card(Suit.Hearts, Rank.Six)];
     engine.players[1].cards = [new Card(Suit.Hearts, Rank.Seven), new Card(Suit.Spades, Rank.Eight)];
@@ -34,10 +35,11 @@ describe('Playing Tricks and Joker Rules', () => {
     engine.addPlayer('p3', 'Player 3');
     engine.state = GameState.PLAYING_TRICKS;
     engine.currentPlayerIndex = 0;
+    engine.players.forEach(p => p.currentBid = 0);
 
-    engine.players[0].cards = [new Card(Suit.Spades, Rank.Seven)]; // Joker
-    engine.players[1].cards = [new Card(Suit.Hearts, Rank.Ace)];
-    engine.players[2].cards = [new Card(Suit.Diamonds, Rank.Ace)];
+    engine.players[0].cards = [new Card(Suit.Spades, Rank.Seven), new Card(Suit.Hearts, Rank.Six)]; // Joker + dummy
+    engine.players[1].cards = [new Card(Suit.Hearts, Rank.Ace), new Card(Suit.Hearts, Rank.Six)];
+    engine.players[2].cards = [new Card(Suit.Diamonds, Rank.Ace), new Card(Suit.Hearts, Rank.Six)];
     
     expect(engine.playCard('p1', 0, { type: 'TAKE' })).toBe(true);
     expect(engine.playCard('p2', 0)).toBe(true);
@@ -56,10 +58,11 @@ describe('Playing Tricks and Joker Rules', () => {
     engine.state = GameState.PLAYING_TRICKS;
     engine.currentPlayerIndex = 0;
     engine.trumpSuit = Suit.Diamonds;
+    engine.players.forEach(p => p.currentBid = 0);
 
-    engine.players[0].cards = [new Card(Suit.Hearts, Rank.Six)];
-    engine.players[1].cards = [new Card(Suit.Spades, Rank.Seven)]; // Joker
-    engine.players[2].cards = [new Card(Suit.Hearts, Rank.Seven)];
+    engine.players[0].cards = [new Card(Suit.Hearts, Rank.Six), new Card(Suit.Clubs, Rank.Six)];
+    engine.players[1].cards = [new Card(Suit.Spades, Rank.Seven), new Card(Suit.Clubs, Rank.Six)]; // Joker
+    engine.players[2].cards = [new Card(Suit.Hearts, Rank.Seven), new Card(Suit.Clubs, Rank.Six)];
 
     // P1 leads Hearts 6
     expect(engine.playCard('p1', 0)).toBe(true);
@@ -79,6 +82,7 @@ describe('Playing Tricks and Joker Rules', () => {
     engine.addPlayer('p3', 'Player 3');
     engine.state = GameState.PLAYING_TRICKS;
     engine.currentPlayerIndex = 0;
+    engine.players.forEach(p => p.currentBid = 0);
 
     engine.players[0].cards = [new Card(Suit.Hearts, Rank.Six)];
     engine.players[1].cards = [new Card(Suit.Hearts, Rank.Seven), new Card(Suit.Spades, Rank.Seven)]; // Hearts and Joker

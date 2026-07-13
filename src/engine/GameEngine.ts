@@ -1,5 +1,7 @@
 import { Deck } from './Deck';
 import { Card, Suit, Rank } from './Card';
+import { RoundPlanner, RoundSpec, PlannerSettings } from './RoundPlanner';
+import { RoundType, calculatePlayerScore } from './Scoring';
 
 export enum GameState {
   WAITING_PLAYERS = 'WAITING_PLAYERS',
@@ -42,7 +44,15 @@ export class GameEngine {
   public tableCards: PlayedCard[] = [];
   public currentTrickLeadSuit: Suit | null = null;
   public currentRoundCards: number = 1;
+  public currentRoundType: RoundType = RoundType.STANDARD;
   public isDarkRound: boolean = false;
+  
+  public plan: RoundSpec[] = [];
+  public currentRoundIndex: number = 0;
+  public playedRoundTypes: Set<RoundType> = new Set();
+  
+  public controlGameChooserId: string | null = null;
+  public controlGamesPlayed: number = 0;
 
   constructor(maxPlayers: number = 3) {
     this.maxPlayers = maxPlayers;
@@ -69,6 +79,30 @@ export class GameEngine {
     return true;
   }
 
+  public startGame(settings: PlannerSettings): boolean {
+    if (this.state !== GameState.WAITING_PLAYERS) return false;
+    if (this.players.length !== settings.playersCount) return false;
+
+    this.plan = RoundPlanner.generatePlan(settings);
+    this.currentRoundIndex = 0;
+    this.setupRoundFromPlan();
+    return true;
+  }
+
+  private setupRoundFromPlan() {
+    if (this.currentRoundIndex < this.plan.length) {
+      const spec = this.plan[this.currentRoundIndex];
+      this.currentRoundType = spec.type;
+      this.currentRoundCards = spec.cardsInHand;
+      this.dealerIndex = spec.dealerIndex;
+      this.isDarkRound = spec.type === RoundType.DARK;
+      this.playedRoundTypes.add(spec.type);
+      this.transitionTo(GameState.SHUFFLING_AND_DEALING);
+    } else {
+      this.checkControlGameOrFinish();
+    }
+  }
+
   public transitionTo(newState: GameState) {
     this.state = newState;
     
@@ -81,19 +115,75 @@ export class GameEngine {
         this.currentPlayerIndex = this.getNextPlayerIndex(this.dealerIndex);
         break;
       case GameState.PLAYING_TRICKS:
-        // First trick lead (left of dealer initially, or trick winner later)
-        // In full implementation, trick winner will be set here
+        // First trick lead
         this.currentPlayerIndex = this.getNextPlayerIndex(this.dealerIndex);
         break;
       case GameState.SCORING:
-        // Score calculation goes here
+        this.applyScoring();
+        this.currentRoundIndex++;
+        // Reset state for next round
+        this.players.forEach(p => { p.currentBid = null; p.tricksTaken = 0; });
+        this.setupRoundFromPlan();
         break;
       case GameState.CONTROL_GAME_SETUP:
-        // Wait for lowest scorer to pick setup
+        this.determineControlGameChooser();
         break;
       case GameState.MATCH_FINISHED:
         break;
     }
+  }
+
+  private applyScoring() {
+    for (const player of this.players) {
+      const score = calculatePlayerScore(
+        this.currentRoundType,
+        this.currentRoundCards,
+        player.currentBid,
+        player.tricksTaken
+      );
+      player.score += score;
+    }
+  }
+
+  private checkControlGameOrFinish() {
+    if (this.controlGamesPlayed === 0) {
+      // Must play at least one control game
+      this.transitionTo(GameState.CONTROL_GAME_SETUP);
+      return;
+    }
+
+    // Check for ties for 1st place
+    const maxScore = Math.max(...this.players.map(p => p.score));
+    const firstPlacePlayers = this.players.filter(p => p.score === maxScore);
+
+    if (firstPlacePlayers.length > 1) {
+      // Tie for first place, another control game
+      this.transitionTo(GameState.CONTROL_GAME_SETUP);
+    } else {
+      this.transitionTo(GameState.MATCH_FINISHED);
+    }
+  }
+
+  private determineControlGameChooser() {
+    let minScore = Math.min(...this.players.map(p => p.score));
+    const lowestPlayers = this.players.filter(p => p.score === minScore);
+    // If tie for lowest, we just pick the first one for now (could add tie-breaker logic)
+    this.controlGameChooserId = lowestPlayers[0].id;
+  }
+
+  public setupControlGame(playerId: string, type: RoundType, newDealerIndex: number): boolean {
+    if (this.state !== GameState.CONTROL_GAME_SETUP) return false;
+    if (playerId !== this.controlGameChooserId) return false;
+    if (!this.playedRoundTypes.has(type)) return false;
+
+    this.currentRoundType = type;
+    this.currentRoundCards = this.players.length === 3 ? 12 : this.players.length === 4 ? 9 : 6; // Max cards M
+    this.dealerIndex = newDealerIndex;
+    this.isDarkRound = type === RoundType.DARK;
+    this.controlGamesPlayed++;
+    
+    this.transitionTo(GameState.SHUFFLING_AND_DEALING);
+    return true;
   }
 
   public getNextPlayerIndex(currentIndex: number): number {
@@ -108,8 +198,7 @@ export class GameEngine {
     // Basic dealing stub for now
     this.deck.generateAndShuffleDeck();
     
-    // Default to deal 1 card for now
-    const cardsToDeal = 1;
+    const cardsToDeal = this.currentRoundCards;
     for (let i = 0; i < cardsToDeal; i++) {
       for (const player of this.players) {
         const card = this.deck.cards.pop();
@@ -125,6 +214,12 @@ export class GameEngine {
     }
 
     this.transitionTo(GameState.BIDDING);
+    
+    // Auto-skip bidding for Gold and Miser
+    if (this.currentRoundType === RoundType.GOLD || this.currentRoundType === RoundType.MISER) {
+      this.players.forEach(p => p.currentBid = null);
+      this.transitionTo(GameState.PLAYING_TRICKS);
+    }
   }
 
   public getAvailableBids(playerIndex: number): number[] {
@@ -195,6 +290,10 @@ export class GameEngine {
 
     // Advance turn or transition to playing tricks
     if (pIndex === this.dealerIndex) {
+      if (this.currentRoundType === RoundType.GOLD || this.currentRoundType === RoundType.MISER) {
+        // Gold and Miser have no bidding, so this shouldn't happen actually,
+        // but if it does we skip. However, in Gold/Miser we should transition directly.
+      }
       this.transitionTo(GameState.PLAYING_TRICKS);
     } else {
       this.advanceTurn();

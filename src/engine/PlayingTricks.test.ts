@@ -9,22 +9,21 @@ describe('Playing Tricks and Joker Rules', () => {
     engine.addPlayer('p3', 'Player 3');
     engine.state = GameState.PLAYING_TRICKS;
     engine.currentPlayerIndex = 0;
-    engine.players.forEach(p => p.currentBid = 0);
+    engine.players.forEach((p) => (p.currentBid = 0));
 
     engine.players[0].cards = [new Card(Suit.Hearts, Rank.Six)];
-    engine.players[1].cards = [new Card(Suit.Hearts, Rank.Seven), new Card(Suit.Spades, Rank.Eight)];
+    engine.players[1].cards = [
+      new Card(Suit.Hearts, Rank.Seven),
+      new Card(Suit.Spades, Rank.Eight),
+    ];
     engine.players[2].cards = [new Card(Suit.Spades, Rank.Nine)];
 
-    // P1 plays Hearts
     expect(engine.playCard('p1', 0)).toBe(true);
 
-    // P2 tries to play Spades (invalid, must follow Hearts)
     expect(engine.playCard('p2', 1)).toBe(false);
-    
-    // P2 plays Hearts (valid)
+
     expect(engine.playCard('p2', 0)).toBe(true);
 
-    // P3 plays Spades (valid, has no Hearts)
     expect(engine.playCard('p3', 0)).toBe(true);
   });
 
@@ -35,19 +34,18 @@ describe('Playing Tricks and Joker Rules', () => {
     engine.addPlayer('p3', 'Player 3');
     engine.state = GameState.PLAYING_TRICKS;
     engine.currentPlayerIndex = 0;
-    engine.players.forEach(p => p.currentBid = 0);
+    engine.players.forEach((p) => (p.currentBid = 0));
 
-    engine.players[0].cards = [new Card(Suit.Spades, Rank.Seven), new Card(Suit.Hearts, Rank.Six)]; // Joker + dummy
+    engine.players[0].cards = [new Card(Suit.Spades, Rank.Seven), new Card(Suit.Hearts, Rank.Six)];
     engine.players[1].cards = [new Card(Suit.Hearts, Rank.Ace), new Card(Suit.Hearts, Rank.Six)];
     engine.players[2].cards = [new Card(Suit.Diamonds, Rank.Ace), new Card(Suit.Hearts, Rank.Six)];
-    
+
     expect(engine.playCard('p1', 0, { type: 'TAKE' })).toBe(true);
     expect(engine.playCard('p2', 0)).toBe(true);
     expect(engine.playCard('p3', 0)).toBe(true);
 
-    // Trick resolved, P1 should win
     expect(engine.players[0].tricksTaken).toBe(1);
-    expect(engine.currentPlayerIndex).toBe(0); // Winner leads next
+    expect(engine.currentPlayerIndex).toBe(0);
   });
 
   it('joker played second as DROP acts as 5 of lead suit and loses', () => {
@@ -58,20 +56,16 @@ describe('Playing Tricks and Joker Rules', () => {
     engine.state = GameState.PLAYING_TRICKS;
     engine.currentPlayerIndex = 0;
     engine.trumpSuit = Suit.Diamonds;
-    engine.players.forEach(p => p.currentBid = 0);
+    engine.players.forEach((p) => (p.currentBid = 0));
 
     engine.players[0].cards = [new Card(Suit.Hearts, Rank.Six), new Card(Suit.Clubs, Rank.Six)];
-    engine.players[1].cards = [new Card(Suit.Spades, Rank.Seven), new Card(Suit.Clubs, Rank.Six)]; // Joker
+    engine.players[1].cards = [new Card(Suit.Spades, Rank.Seven), new Card(Suit.Clubs, Rank.Six)];
     engine.players[2].cards = [new Card(Suit.Hearts, Rank.Seven), new Card(Suit.Clubs, Rank.Six)];
 
-    // P1 leads Hearts 6
     expect(engine.playCard('p1', 0)).toBe(true);
-    // P2 plays Joker as DROP
     expect(engine.playCard('p2', 0, { type: 'DROP' })).toBe(true);
-    // P3 plays Hearts 7
     expect(engine.playCard('p3', 0)).toBe(true);
 
-    // Trick resolved, P3 should win because P3's 7 > P1's 6, and Joker is 5
     expect(engine.players[2].tricksTaken).toBe(1);
   });
 
@@ -82,14 +76,16 @@ describe('Playing Tricks and Joker Rules', () => {
     engine.addPlayer('p3', 'Player 3');
     engine.state = GameState.PLAYING_TRICKS;
     engine.currentPlayerIndex = 0;
-    engine.players.forEach(p => p.currentBid = 0);
+    engine.players.forEach((p) => (p.currentBid = 0));
 
     engine.players[0].cards = [new Card(Suit.Hearts, Rank.Six)];
-    engine.players[1].cards = [new Card(Suit.Hearts, Rank.Seven), new Card(Suit.Spades, Rank.Seven)]; // Hearts and Joker
+    engine.players[1].cards = [
+      new Card(Suit.Hearts, Rank.Seven),
+      new Card(Suit.Spades, Rank.Seven),
+    ];
     engine.players[2].cards = [new Card(Suit.Clubs, Rank.Six)];
 
     expect(engine.playCard('p1', 0)).toBe(true);
-    // P2 has Hearts, but chooses to play Joker (index 1). This should be allowed.
     expect(engine.playCard('p2', 1, { type: 'TAKE' })).toBe(true);
   });
 });

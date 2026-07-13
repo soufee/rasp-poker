@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 252" role="img" aria-labelledby="title">
+  <title id="title">Playing card back</title>
+  <defs>
+    <pattern id="p" width="24" height="24" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="24" height="24" fill="#0E493B"/>
+      <path fill="none" stroke="#28755F" stroke-width="2" d="M0 6h24M0 18h24"/>
+      <circle cx="12" cy="12" r="2" fill="#D0AA56"/>
+    </pattern>
+    <linearGradient id="g" x1="20" y1="12" x2="160" y2="240" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#E4C46E"/>
+      <stop offset=".5" stop-color="#9A6B26"/>
+      <stop offset="1" stop-color="#F1D883"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="176" height="248" rx="17" fill="#0C1714" stroke="url(#g)" stroke-width="4"/>
+  <rect x="11" y="11" width="158" height="230" rx="11" fill="url(#p)" stroke="#D3AD58" stroke-width="2"/>
+  <path fill="#10241E" stroke="#E3C56F" stroke-width="2" d="m90 76 40 23v54l-40 23-40-23V99z"/>
+  <path fill="none" stroke="#E3C56F" stroke-linecap="round" stroke-width="5" d="M71 150c9-7 13-18 19-49 6 31 10 42 19 49M77 138h26"/>
+</svg>

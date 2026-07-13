@@ -32,7 +32,7 @@ export class RoundPlanner {
         roundNumber: roundNumber++,
         type,
         cardsInHand: cards,
-        dealerIndex: currentDealer
+        dealerIndex: currentDealer,
       });
       currentDealer = (currentDealer + 1) % N;
     };
@@ -49,27 +49,27 @@ export class RoundPlanner {
       addRound(RoundType.STANDARD, M);
     }
 
-    // 3. Dark Rounds (Тёмная)
+    // 3. Dark rounds
     for (let i = 0; i < N; i++) {
       addRound(RoundType.DARK, M);
     }
 
-    // 4. Percents Rounds (Проценты)
+    // 4. Percent rounds
     for (let i = 0; i < N; i++) {
       addRound(RoundType.PERCENTS, 4);
     }
 
-    // 5. No Trump Rounds (Бескозырка)
+    // 5. No-trump rounds
     for (let i = 0; i < N; i++) {
       addRound(RoundType.NO_TRUMP, M);
     }
 
-    // 6. Gold Rounds (Золотая)
+    // 6. Gold rounds
     for (let i = 0; i < N; i++) {
       addRound(RoundType.GOLD, M);
     }
 
-    // 7. Miser Rounds (Мизер)
+    // 7. Miser rounds
     if (hasMiser) {
       for (let i = 0; i < N; i++) {
         addRound(RoundType.MISER, M);

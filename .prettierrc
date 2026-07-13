@@ -2,6 +2,7 @@
   "semi": true,
   "trailingComma": "all",
   "singleQuote": true,
+  "experimentalOperatorPosition": "start",
   "printWidth": 100,
   "tabWidth": 2
 }

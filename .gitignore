@@ -1,5 +1,14 @@
 node_modules/
 dist/
+client/dist/
+test-results/
+playwright-report/
 .env
+.env.local
+.env.*.local
 .DS_Store
 coverage/
+*.log
+*.tsbuildinfo
+.idea/
+.vscode/

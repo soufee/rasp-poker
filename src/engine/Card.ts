@@ -20,7 +20,7 @@ export enum Rank {
 export class Card {
   constructor(
     public readonly suit: Suit,
-    public readonly rank: Rank
+    public readonly rank: Rank,
   ) {}
 
   public get isJoker(): boolean {

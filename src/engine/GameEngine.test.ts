@@ -6,14 +6,21 @@ describe('GameEngine State Machine', () => {
     expect(engine.state).toBe(GameState.WAITING_PLAYERS);
   });
 
-  it('should transition to SHUFFLING_AND_DEALING when full', () => {
+  it('should stay waiting until a full game is started', () => {
     const engine = new GameEngine(3);
     engine.addPlayer('p1', 'Player 1');
     engine.addPlayer('p2', 'Player 2');
     expect(engine.state).toBe(GameState.WAITING_PLAYERS);
-    
+
     engine.addPlayer('p3', 'Player 3');
-    // It should immediately deal and go to BIDDING
+    expect(engine.state).toBe(GameState.WAITING_PLAYERS);
+    expect(
+      engine.startGame({
+        playersCount: 3,
+        hasLadder: true,
+        hasMiser: true,
+      }),
+    ).toBe(true);
     expect(engine.state).toBe(GameState.BIDDING);
     expect(engine.players[0].cards.length).toBe(1);
   });
@@ -23,13 +30,17 @@ describe('GameEngine State Machine', () => {
     engine.addPlayer('p1', 'Player 1');
     engine.addPlayer('p2', 'Player 2');
     engine.addPlayer('p3', 'Player 3');
-    
-    // dealerIndex defaults to 0. First bidder should be index 1.
+    engine.startGame({
+      playersCount: 3,
+      hasLadder: true,
+      hasMiser: true,
+    });
+
     expect(engine.currentPlayerIndex).toBe(1);
-    
+
     engine.advanceTurn();
     expect(engine.currentPlayerIndex).toBe(2);
-    
+
     engine.advanceTurn();
     expect(engine.currentPlayerIndex).toBe(0);
   });

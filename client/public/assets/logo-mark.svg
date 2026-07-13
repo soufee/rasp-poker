@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 72 72" role="img" aria-labelledby="title">
+  <title id="title">Painted Poker mark</title>
+  <defs>
+    <linearGradient id="gold" x1="10" y1="6" x2="61" y2="68" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F4DA8A"/>
+      <stop offset=".48" stop-color="#C89A3D"/>
+      <stop offset="1" stop-color="#8A6122"/>
+    </linearGradient>
+    <linearGradient id="felt" x1="18" y1="12" x2="54" y2="61" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1B7A5B"/>
+      <stop offset="1" stop-color="#0A3C31"/>
+    </linearGradient>
+  </defs>
+  <path fill="#111816" stroke="url(#gold)" stroke-width="2.5" d="M36 3.5 65 20v32L36 68.5 7 52V20z"/>
+  <path fill="url(#felt)" d="m36 10 22.8 13v26L36 62 13.2 49V23z"/>
+  <path fill="none" stroke="#E8C66F" stroke-linecap="round" stroke-width="3" d="M24 49c6-4.2 8.8-10.2 12-24 3.2 13.8 6 19.8 12 24M27 42h18"/>
+  <circle cx="36" cy="25" r="3.8" fill="#F2D57E"/>
+  <path fill="#F2D57E" d="m19 27 4.3 5.8L19 38l-4.3-5.2zm34 0 4.3 5.8L53 38l-4.3-5.2z"/>
+</svg>

@@ -27,11 +27,11 @@ describe('Scoring Logic', () => {
   });
 
   it('Percents Round: score is multiplied by 3', () => {
-    expect(calculatePlayerScore(RoundType.PERCENTS, 4, 2, 2)).toBe(60); // 20 * 3
-    expect(calculatePlayerScore(RoundType.PERCENTS, 4, 0, 0)).toBe(15); // 5 * 3
-    expect(calculatePlayerScore(RoundType.PERCENTS, 4, 4, 4)).toBe(240); // (20*4) * 3
-    expect(calculatePlayerScore(RoundType.PERCENTS, 4, 1, 2)).toBe(6); // 2 * 3
-    expect(calculatePlayerScore(RoundType.PERCENTS, 4, 3, 2)).toBe(-90); // -30 * 3
+    expect(calculatePlayerScore(RoundType.PERCENTS, 4, 2, 2)).toBe(60);
+    expect(calculatePlayerScore(RoundType.PERCENTS, 4, 0, 0)).toBe(15);
+    expect(calculatePlayerScore(RoundType.PERCENTS, 4, 4, 4)).toBe(240);
+    expect(calculatePlayerScore(RoundType.PERCENTS, 4, 1, 2)).toBe(6);
+    expect(calculatePlayerScore(RoundType.PERCENTS, 4, 3, 2)).toBe(-90);
   });
 
   it('Gold Round: 10 per trick, no penalties', () => {

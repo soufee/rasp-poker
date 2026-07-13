@@ -1,27 +1,50 @@
-version: '3.8'
+# Production / remote server infrastructure.
+# Do NOT put real passwords in this file or in git.
+# On the server: create a .env (or export vars) with POSTGRES_* and REDIS_*.
+#
+# Local development: do NOT use this compose for DB/Redis.
+# Use the already-running Postgres (localhost:5432) and Redis (localhost:6379)
+# configured via project .env (see .env.example).
 
 services:
   db:
     image: postgres:15-alpine
     container_name: rasp_poker_db
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: rasp_poker
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in server environment}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in server environment}
+      POSTGRES_DB: ${POSTGRES_DB:-rasp_poker}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   redis:
     image: redis:7-alpine
     container_name: rasp_poker_redis
+    # Password comes from host env — never hardcode
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:?Set REDIS_PASSWORD in server environment}
+      - --appendonly
+      - "yes"
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
 volumes:
   postgres_data:

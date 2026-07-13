@@ -1,5 +1,5 @@
 import { Deck } from './Deck';
-import { Card, Suit, Rank } from './Card';
+import { Suit, Rank } from './Card';
 
 describe('Deck logic', () => {
   it('should generate a 36 card deck', () => {
@@ -9,8 +9,7 @@ describe('Deck logic', () => {
 
   it('generateAndShuffleDeck should never return joker as the last card', () => {
     const deck = new Deck();
-    
-    // Simulate multiple generations to ensure Joker is never at the end
+
     for (let i = 0; i < 100; i++) {
       const cards = deck.generateAndShuffleDeck();
       const lastCard = cards[cards.length - 1];
@@ -21,7 +20,7 @@ describe('Deck logic', () => {
   it('deck should contain exactly one joker', () => {
     const deck = new Deck();
     const cards = deck.generateAndShuffleDeck();
-    const jokers = cards.filter(c => c.isJoker);
+    const jokers = cards.filter((c) => c.isJoker);
     expect(jokers.length).toBe(1);
     expect(jokers[0].suit).toBe(Suit.Spades);
     expect(jokers[0].rank).toBe(Rank.Seven);

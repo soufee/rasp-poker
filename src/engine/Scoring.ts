@@ -4,7 +4,7 @@ export enum RoundType {
   PERCENTS = 'PERCENTS',
   NO_TRUMP = 'NO_TRUMP',
   GOLD = 'GOLD',
-  MISER = 'MISER'
+  MISER = 'MISER',
 }
 
 export interface PlayerScoreInput {
@@ -23,7 +23,7 @@ export function calculatePlayerScore(
   roundType: RoundType,
   cardsInHand: number,
   bid: number | null,
-  taken: number
+  taken: number,
 ): number {
   if (roundType === RoundType.GOLD) {
     return 10 * taken;

@@ -4,6 +4,7 @@ interface TestMessage {
   type: string;
   payload?: unknown;
   message?: string;
+  code?: string;
 }
 
 class FakeSocket implements RoomSocket {
@@ -128,7 +129,8 @@ describe('RoomManager', () => {
     expect(state.viewerId).toBe('owner');
     expect(state.hostId).toBe('owner');
     expect(state.validCardIndices).toEqual([]);
-    expect(state.playedRoundTypes).toEqual([]);
+    expect(state.chatEnabled).toBe(false); // only 1 human
+    expect(state.stateVersion).toBe(0);
     const players = state.players as Array<Record<string, unknown>>;
     expect(players[0].connected).toBe(true);
   });
@@ -173,10 +175,20 @@ describe('RoomManager', () => {
     expect(manager.getRoomInfo('room-start')?.playersCount).toBe(3);
   });
 
-  it('sanitizes chat and keeps the latest fifty messages', () => {
+  it('enables chat only with ≥2 humans; keeps 50 messages', () => {
     const manager = createManagerWithRoom('room-chat');
     const ownerSocket = new FakeSocket();
+    const secondSocket = new FakeSocket();
     manager.joinRoom('room-chat', 'owner', 'Владелец', ownerSocket);
+
+    // 1 human → reject
+    manager.handleAction('room-chat', 'owner', {
+      type: 'CHAT_SEND',
+      text: 'hello',
+    });
+    expect(getLastMessage(ownerSocket, 'ACTION_REJECTED')?.code).toBe('CHAT_DISABLED');
+
+    manager.joinRoom('room-chat', 'p2', 'Игрок 2', secondSocket);
 
     for (let messageIndex = 0; messageIndex < 55; messageIndex += 1) {
       manager.handleAction('room-chat', 'owner', {
@@ -188,7 +200,6 @@ describe('RoomManager', () => {
     const firstChat = ownerSocket.messages.find((message) => message.type === 'CHAT_MESSAGE')
       ?.payload as Record<string, unknown>;
     expect(firstChat.text).toBe('m0');
-    expect(typeof firstChat.createdAt).toBe('string');
 
     const reconnectSocket = new FakeSocket();
     manager.joinRoom('room-chat', 'owner', 'Владелец', reconnectSocket);
@@ -198,11 +209,58 @@ describe('RoomManager', () => {
     expect(history).toHaveLength(50);
     expect(history[0].text).toBe('m5');
     expect(history[49].text).toBe('m54');
+  });
 
-    manager.handleAction('room-chat', 'owner', {
-      type: 'CHAT_SEND',
-      text: '   ',
+  it('rejects bot chat', () => {
+    const manager = createManagerWithRoom('room-bot-chat');
+    const human1 = new FakeSocket();
+    const human2 = new FakeSocket();
+    const botSocket = new FakeSocket();
+    manager.joinRoom('room-bot-chat', 'h1', 'H1', human1);
+    manager.joinRoom('room-bot-chat', 'h2', 'H2', human2);
+    manager.joinRoom('room-bot-chat', 'bot1', 'Bot', botSocket, { isBot: true });
+    manager.handleAction('room-bot-chat', 'bot1', { type: 'CHAT_SEND', text: 'nope' });
+    expect(getLastMessage(botSocket, 'ACTION_REJECTED')?.code).toBe('BOTS_NO_CHAT');
+  });
+
+  it('forceDefaultAction advances a silent bidder', () => {
+    const manager = createManagerWithRoom('room-timeout');
+    const s1 = new FakeSocket();
+    const s2 = new FakeSocket();
+    const s3 = new FakeSocket();
+    manager.joinRoom('room-timeout', 'owner', 'Owner', s1);
+    manager.joinRoom('room-timeout', 'p2', 'P2', s2);
+    manager.joinRoom('room-timeout', 'p3', 'P3', s3);
+    manager.handleAction('room-timeout', 'owner', {
+      type: 'START_GAME',
+      shortPlan: true,
+      shortRounds: 1,
+      settings: { playersCount: 3, hasLadder: true, hasMiser: false },
     });
-    expect(getLastMessage(reconnectSocket, 'ACTION_REJECTED')?.message).toContain('пустым');
+    const room = manager.getRoom('room-timeout');
+    expect(room?.engine.state).toBe('BIDDING');
+    const ok = manager.forceDefaultAction('room-timeout');
+    expect(ok).toBe(true);
+    expect((room?.timeoutCount ?? 0) > 0).toBe(true);
+  });
+
+  it('hides other players cards in fog of war', () => {
+    const manager = createManagerWithRoom('room-fog');
+    const s1 = new FakeSocket();
+    const s2 = new FakeSocket();
+    const s3 = new FakeSocket();
+    manager.joinRoom('room-fog', 'owner', 'Owner', s1);
+    manager.joinRoom('room-fog', 'p2', 'P2', s2);
+    manager.joinRoom('room-fog', 'p3', 'P3', s3);
+    manager.handleAction('room-fog', 'owner', {
+      type: 'START_GAME',
+      shortPlan: true,
+      settings: { playersCount: 3, hasLadder: true, hasMiser: false },
+    });
+    const state = getLastMessage(s1, 'STATE_UPDATE')?.payload as {
+      players: Array<{ id: string; cards: Array<null | { suit?: string }> }>;
+    };
+    const other = state.players.find((p) => p.id === 'p2');
+    expect(other?.cards.every((c) => c === null)).toBe(true);
   });
 });

@@ -6,6 +6,12 @@ import { RoundType } from '../engine/Scoring';
 const OPEN_SOCKET_STATE = 1;
 const MAX_CHAT_MESSAGES = 50;
 const MAX_CHAT_MESSAGE_LENGTH = 300;
+const MAX_WS_MESSAGE_BYTES = 16_384;
+const RATE_LIMIT_WINDOW_MS = 1000;
+const RATE_LIMIT_MAX = 20;
+const HUMAN_TURN_MS = 30_000;
+const BOT_TURN_MS = 3_000;
+const RECONNECT_GRACE_MS = 60_000;
 
 export type PlayerLimit = 3 | 4 | 6;
 export type RoomStatus = 'waiting' | 'playing' | 'finished';
@@ -25,6 +31,7 @@ export interface CreateRoomInput {
   hasLadder: boolean;
   hasMiser: boolean;
   isPrivate?: boolean;
+  isTraining?: boolean;
 }
 
 export interface PublicRoomInfo {
@@ -74,6 +81,7 @@ interface NormalizedCreateRoomInput {
   ownerName: string;
   maxPlayers: PlayerLimit;
   isPrivate: boolean;
+  isTraining: boolean;
   settings: RoomSettings;
 }
 
@@ -82,6 +90,11 @@ interface Client {
   userName: string;
   socket: RoomSocket;
   connected: boolean;
+  isBot: boolean;
+  lastMessageAt: number;
+  messageCountWindow: number;
+  windowStartedAt: number;
+  disconnectTimer: ReturnType<typeof setTimeout> | null;
 }
 
 class Room {
@@ -91,10 +104,15 @@ class Room {
   public ownerName: string;
   public readonly maxPlayers: PlayerLimit;
   public readonly isPrivate: boolean;
+  public readonly isTraining: boolean;
   public settings: RoomSettings;
   public readonly engine: GameEngine;
   public readonly clients = new Map<string, Client>();
   public readonly chatHistory: ChatMessage[] = [];
+  public stateVersion = 0;
+  public turnDeadlineAt: number | null = null;
+  public turnTimer: ReturnType<typeof setTimeout> | null = null;
+  public timeoutCount = 0;
 
   public constructor(input: NormalizedCreateRoomInput) {
     this.id = input.id;
@@ -103,6 +121,7 @@ class Room {
     this.ownerName = input.ownerName;
     this.maxPlayers = input.maxPlayers;
     this.isPrivate = input.isPrivate;
+    this.isTraining = input.isTraining;
     this.settings = { ...input.settings };
     this.engine = new GameEngine(input.maxPlayers);
   }
@@ -113,9 +132,15 @@ type ServerEvent =
   | { type: 'STATE_UPDATE'; payload: Record<string, unknown> }
   | { type: 'CHAT_HISTORY'; payload: ChatMessage[] }
   | { type: 'CHAT_MESSAGE'; payload: ChatMessage }
-  | { type: 'ACTION_REJECTED'; message: string };
+  | { type: 'ACTION_REJECTED'; message: string; code?: string; stateVersion?: number }
+  | { type: 'TURN_TIMEOUT'; payload: { playerId: string; stateVersion: number } }
+  | { type: 'SYSTEM'; message: string };
 
 type JsonRecord = Record<string, unknown>;
+
+export interface JoinOptions {
+  isBot?: boolean;
+}
 
 export class RoomManager {
   private readonly rooms = new Map<string, Room>();
@@ -154,7 +179,36 @@ export class RoomManager {
     return room ? this.toPublicRoomInfo(room) : null;
   }
 
-  public joinRoom(roomId: string, userId: string, userName: string, socket: RoomSocket): boolean {
+  public getRoom(roomId: string): Room | undefined {
+    return this.rooms.get(roomId);
+  }
+
+  public countHumans(room: Room): number {
+    let count = 0;
+    for (const client of room.clients.values()) {
+      if (!client.isBot && room.engine.players.some((p) => p.id === client.userId)) {
+        count += 1;
+      }
+    }
+    // Also count connected humans only for chat? Spec: "2 or more live people at table"
+    // Use seated non-bot players
+    return room.engine.players.filter((p) => {
+      const c = room.clients.get(p.id);
+      return c && !c.isBot;
+    }).length;
+  }
+
+  public isChatEnabled(room: Room): boolean {
+    return this.countHumans(room) >= 2;
+  }
+
+  public joinRoom(
+    roomId: string,
+    userId: string,
+    userName: string,
+    socket: RoomSocket,
+    options: JoinOptions = {},
+  ): boolean {
     const room = this.rooms.get(roomId);
     if (!room) {
       return false;
@@ -166,6 +220,7 @@ export class RoomManager {
       return false;
     }
 
+    const isBot = options.isBot === true;
     const existingPlayer = room.engine.players.find((player) => player.id === normalizedUserId);
     if (!existingPlayer) {
       if (room.engine.state !== GameState.WAITING_PLAYERS) {
@@ -188,26 +243,41 @@ export class RoomManager {
     }
 
     const existingClient = room.clients.get(normalizedUserId);
+    if (existingClient?.disconnectTimer) {
+      clearTimeout(existingClient.disconnectTimer);
+      existingClient.disconnectTimer = null;
+    }
     if (existingClient) {
       existingClient.userName = normalizedUserName;
       existingClient.socket = socket;
       existingClient.connected = true;
+      existingClient.isBot = existingClient.isBot || isBot;
     } else {
       room.clients.set(normalizedUserId, {
         userId: normalizedUserId,
         userName: normalizedUserName,
         socket,
         connected: true,
+        isBot,
+        lastMessageAt: 0,
+        messageCountWindow: 0,
+        windowStartedAt: Date.now(),
+        disconnectTimer: null,
       });
     }
 
     this.attachSocketHandlers(room, normalizedUserId, socket);
     this.broadcastRoomInfo(room.id);
     this.broadcastState(room.id);
-    this.sendEvent(socket, {
-      type: 'CHAT_HISTORY',
-      payload: room.chatHistory.map((message) => ({ ...message })),
-    });
+
+    const client = room.clients.get(normalizedUserId);
+    if (client) {
+      const chatEnabled = this.isChatEnabled(room);
+      this.sendEvent(socket, {
+        type: 'CHAT_HISTORY',
+        payload: chatEnabled ? room.chatHistory.map((message) => ({ ...message })) : [],
+      });
+    }
     return true;
   }
 
@@ -216,7 +286,6 @@ export class RoomManager {
     if (!room) {
       return;
     }
-
     this.broadcastEvent(room, {
       type: 'ROOM_INFO',
       payload: this.toPublicRoomInfo(room),
@@ -251,7 +320,7 @@ export class RoomManager {
       return;
     }
     if (!this.isRecord(action) || typeof action.type !== 'string') {
-      this.rejectAction(room, userId, 'Некорректный формат действия.');
+      this.rejectAction(room, userId, 'Некорректный формат действия.', 'INVALID_FORMAT');
       return;
     }
 
@@ -272,14 +341,164 @@ export class RoomManager {
       case 'CHAT_SEND':
         this.handleChatSend(room, userId, action);
         break;
+      case 'PING':
+        this.sendEvent(room.clients.get(userId)?.socket as RoomSocket, {
+          type: 'SYSTEM',
+          message: 'PONG',
+        });
+        break;
       default:
-        this.rejectAction(room, userId, 'Неизвестное действие.');
+        this.rejectAction(room, userId, 'Неизвестное действие.', 'UNKNOWN_ACTION');
     }
 
     if (stateChanged) {
+      room.stateVersion += 1;
+      this.scheduleTurnTimer(room);
       this.broadcastRoomInfo(room.id);
       this.broadcastState(room.id);
     }
+  }
+
+  /** Server-side auto action when turn timer fires */
+  public forceDefaultAction(roomId: string): boolean {
+    const room = this.rooms.get(roomId);
+    if (!room) {
+      return false;
+    }
+    return this.applyDefaultTurnAction(room);
+  }
+
+  private applyDefaultTurnAction(room: Room): boolean {
+    const engine = room.engine;
+    const stateBefore = engine.state;
+
+    if (engine.state === GameState.CONTROL_GAME_SETUP && engine.controlGameChooserId) {
+      const types = Array.from(engine.playedRoundTypes);
+      const type = types.includes(RoundType.STANDARD) ? RoundType.STANDARD : types[0];
+      if (!type) {
+        return false;
+      }
+      const chooserId = engine.controlGameChooserId;
+      const dealerIndex = engine.players.findIndex((p) => p.id === chooserId);
+      const ok = engine.setupControlGame(
+        chooserId,
+        type,
+        dealerIndex >= 0 ? dealerIndex : 0,
+      );
+      if (ok) {
+        room.timeoutCount += 1;
+        room.stateVersion += 1;
+        this.broadcastEvent(room, {
+          type: 'TURN_TIMEOUT',
+          payload: { playerId: chooserId, stateVersion: room.stateVersion },
+        });
+        this.scheduleTurnTimer(room);
+        this.broadcastRoomInfo(room.id);
+        this.broadcastState(room.id);
+      }
+      return ok;
+    }
+
+    const current = engine.players[engine.currentPlayerIndex];
+    if (!current) {
+      return false;
+    }
+
+    if (engine.state === GameState.BIDDING) {
+      const bids = engine.getLegalBids(current.id);
+      if (bids.length === 0) {
+        return false;
+      }
+      const bid = Math.min(...bids);
+      const result = engine.applyAction({ type: 'PLACE_BID', playerId: current.id, bid });
+      if (result.ok) {
+        room.timeoutCount += 1;
+        room.stateVersion += 1;
+        this.broadcastEvent(room, {
+          type: 'TURN_TIMEOUT',
+          payload: { playerId: current.id, stateVersion: room.stateVersion },
+        });
+        this.scheduleTurnTimer(room);
+        this.broadcastRoomInfo(room.id);
+        this.broadcastState(room.id);
+      }
+      return result.ok;
+    }
+
+    if (engine.state === GameState.PLAYING_TRICKS) {
+      const plays = engine.getLegalPlays(current.id);
+      if (plays.length === 0) {
+        return false;
+      }
+      const play = plays[0];
+      const jokerAction = play.jokerActions?.[0];
+      const result = engine.applyAction({
+        type: 'PLAY_CARD',
+        playerId: current.id,
+        cardIndex: play.cardIndex,
+        jokerAction,
+      });
+      if (result.ok) {
+        room.timeoutCount += 1;
+        room.stateVersion += 1;
+        this.broadcastEvent(room, {
+          type: 'TURN_TIMEOUT',
+          payload: { playerId: current.id, stateVersion: room.stateVersion },
+        });
+        this.scheduleTurnTimer(room);
+        this.broadcastRoomInfo(room.id);
+        this.broadcastState(room.id);
+      }
+      return result.ok;
+    }
+
+    return stateBefore !== engine.state;
+  }
+
+  private scheduleTurnTimer(room: Room): void {
+    if (room.turnTimer) {
+      clearTimeout(room.turnTimer);
+      room.turnTimer = null;
+    }
+    room.turnDeadlineAt = null;
+
+    const engine = room.engine;
+    const timedStates = [
+      GameState.BIDDING,
+      GameState.PLAYING_TRICKS,
+      GameState.CONTROL_GAME_SETUP,
+    ];
+    if (!timedStates.includes(engine.state)) {
+      return;
+    }
+    if (engine.state === GameState.MATCH_FINISHED) {
+      return;
+    }
+
+    let actorId: string | null = null;
+    if (engine.state === GameState.CONTROL_GAME_SETUP) {
+      actorId = engine.controlGameChooserId;
+    } else {
+      actorId = engine.players[engine.currentPlayerIndex]?.id ?? null;
+    }
+    if (!actorId) {
+      return;
+    }
+
+    const client = room.clients.get(actorId);
+    const isBot = client?.isBot === true;
+    const delay = isBot ? BOT_TURN_MS : HUMAN_TURN_MS;
+    room.turnDeadlineAt = Date.now() + delay;
+    const versionAtSchedule = room.stateVersion;
+
+    room.turnTimer = setTimeout(() => {
+      const live = this.rooms.get(room.id);
+      if (!live || live.stateVersion !== versionAtSchedule) {
+        return;
+      }
+      this.applyDefaultTurnAction(live);
+    }, delay);
+    room.turnTimer.unref?.();
   }
 
   private getLegacyCreateInput(roomId: string, maxPlayers: number | undefined): CreateRoomInput {
@@ -344,6 +563,7 @@ export class RoomManager {
       ownerName,
       maxPlayers: input.maxPlayers,
       isPrivate: input.isPrivate ?? false,
+      isTraining: input.isTraining ?? false,
       settings: {
         playersCount: input.maxPlayers,
         hasLadder: input.hasLadder,
@@ -396,12 +616,28 @@ export class RoomManager {
         return;
       }
 
+      const rawMessage = typeof message === 'string' ? message : String(message);
+      if (rawMessage.length > MAX_WS_MESSAGE_BYTES) {
+        this.rejectAction(room, userId, 'Сообщение слишком большое.', 'MESSAGE_TOO_LARGE');
+        return;
+      }
+
+      const now = Date.now();
+      if (now - client.windowStartedAt > RATE_LIMIT_WINDOW_MS) {
+        client.windowStartedAt = now;
+        client.messageCountWindow = 0;
+      }
+      client.messageCountWindow += 1;
+      if (client.messageCountWindow > RATE_LIMIT_MAX) {
+        this.rejectAction(room, userId, 'Слишком много сообщений.', 'RATE_LIMIT');
+        return;
+      }
+
       let action: unknown;
       try {
-        const rawMessage = typeof message === 'string' ? message : String(message);
         action = JSON.parse(rawMessage) as unknown;
       } catch {
-        this.rejectAction(room, userId, 'Сообщение должно быть корректным JSON.');
+        this.rejectAction(room, userId, 'Сообщение должно быть корректным JSON.', 'INVALID_JSON');
         return;
       }
       this.handleAction(room.id, userId, action);
@@ -413,6 +649,25 @@ export class RoomManager {
         return;
       }
       client.connected = false;
+      if (client.disconnectTimer) {
+        clearTimeout(client.disconnectTimer);
+      }
+      // Grace period then bot takeover for humans mid-game
+      if (!client.isBot && room.engine.state !== GameState.WAITING_PLAYERS) {
+        client.disconnectTimer = setTimeout(() => {
+          const live = room.clients.get(userId);
+          if (live && !live.connected) {
+            live.isBot = true;
+            this.broadcastEvent(room, {
+              type: 'SYSTEM',
+              message: `Игрок ${live.userName} заменён ботом после disconnect.`,
+            });
+            this.scheduleTurnTimer(room);
+            this.broadcastState(room.id);
+          }
+        }, RECONNECT_GRACE_MS);
+        client.disconnectTimer.unref?.();
+      }
       this.broadcastRoomInfo(room.id);
       this.broadcastState(room.id);
     });
@@ -420,15 +675,15 @@ export class RoomManager {
 
   private handleStartGame(room: Room, userId: string, action: JsonRecord): boolean {
     if (userId !== room.ownerId) {
-      this.rejectAction(room, userId, 'Начать игру может только владелец комнаты.');
+      this.rejectAction(room, userId, 'Начать игру может только владелец комнаты.', 'NOT_HOST');
       return false;
     }
     if (room.engine.state !== GameState.WAITING_PLAYERS) {
-      this.rejectAction(room, userId, 'Игра уже началась.');
+      this.rejectAction(room, userId, 'Игра уже началась.', 'ALREADY_STARTED');
       return false;
     }
     if (room.engine.players.length !== room.maxPlayers) {
-      this.rejectAction(room, userId, `Для старта нужны все игроки: ${room.maxPlayers}.`);
+      this.rejectAction(room, userId, `Для старта нужны все игроки: ${room.maxPlayers}.`, 'NOT_FULL');
       return false;
     }
 
@@ -437,13 +692,16 @@ export class RoomManager {
         ? { ...room.settings }
         : this.parseRoomSettings(action.settings);
     if (!settings || settings.playersCount !== room.maxPlayers) {
-      this.rejectAction(room, userId, 'Некорректные настройки игры.');
+      this.rejectAction(room, userId, 'Некорректные настройки игры.', 'INVALID_SETTINGS');
       return false;
     }
 
-    const started = room.engine.startGame(settings);
+    const shortPlan = action.shortPlan === true;
+    const started = shortPlan
+      ? room.engine.startShortGame(settings, typeof action.shortRounds === 'number' ? action.shortRounds : 2)
+      : room.engine.startGame(settings);
     if (!started) {
-      this.rejectAction(room, userId, 'Не удалось начать игру.');
+      this.rejectAction(room, userId, 'Не удалось начать игру.', 'START_FAILED');
       return false;
     }
     room.settings = { ...settings };
@@ -452,74 +710,105 @@ export class RoomManager {
 
   private handlePlaceBid(room: Room, userId: string, action: JsonRecord): boolean {
     if (!Number.isInteger(action.bid)) {
-      this.rejectAction(room, userId, 'Заказ должен быть целым числом.');
+      this.rejectAction(room, userId, 'Заказ должен быть целым числом.', 'INVALID_BID');
       return false;
     }
 
-    const placed = room.engine.placeBid(userId, action.bid as number);
-    if (!placed) {
+    const result = room.engine.applyAction({
+      type: 'PLACE_BID',
+      playerId: userId,
+      bid: action.bid as number,
+    });
+    if (!result.ok) {
       this.rejectAction(
         room,
         userId,
         'Этот заказ сейчас недоступен или ход принадлежит другому игроку.',
+        'ILLEGAL_BID',
       );
     }
-    return placed;
+    return result.ok;
   }
 
   private handlePlayCard(room: Room, userId: string, action: JsonRecord): boolean {
     if (!Number.isInteger(action.cardIndex)) {
-      this.rejectAction(room, userId, 'Индекс карты должен быть целым числом.');
+      this.rejectAction(room, userId, 'Индекс карты должен быть целым числом.', 'INVALID_CARD');
       return false;
     }
 
     const jokerAction = this.parseJokerAction(action.jokerAction);
     if (action.jokerAction !== undefined && !jokerAction) {
-      this.rejectAction(room, userId, 'Некорректное действие джокера.');
+      this.rejectAction(room, userId, 'Некорректное действие джокера.', 'INVALID_JOKER');
       return false;
     }
 
-    const played = room.engine.playCard(userId, action.cardIndex as number, jokerAction);
-    if (!played) {
+    const result = room.engine.applyAction({
+      type: 'PLAY_CARD',
+      playerId: userId,
+      cardIndex: action.cardIndex as number,
+      jokerAction,
+    });
+    if (!result.ok) {
       this.rejectAction(
         room,
         userId,
         'Эту карту нельзя сыграть: проверьте очередь, масть и козырь.',
+        'ILLEGAL_CARD',
       );
     }
-    return played;
+    return result.ok;
   }
 
   private handleSetupControl(room: Room, userId: string, action: JsonRecord): boolean {
     if (!this.isRoundType(action.roundType)) {
-      this.rejectAction(room, userId, 'Некорректный тип контрольной игры.');
+      this.rejectAction(room, userId, 'Некорректный тип контрольной игры.', 'INVALID_ROUND_TYPE');
       return false;
     }
     if (!Number.isInteger(action.dealerIndex)) {
-      this.rejectAction(room, userId, 'Некорректный индекс сдающего.');
+      this.rejectAction(room, userId, 'Некорректный индекс сдающего.', 'INVALID_DEALER');
       return false;
     }
 
-    const configured = room.engine.setupControlGame(
-      userId,
-      action.roundType,
-      action.dealerIndex as number,
-    );
-    if (!configured) {
-      this.rejectAction(room, userId, 'Нельзя настроить контрольную игру с этими параметрами.');
+    const result = room.engine.applyAction({
+      type: 'SETUP_CONTROL',
+      playerId: userId,
+      roundType: action.roundType,
+      dealerIndex: action.dealerIndex as number,
+    });
+    if (!result.ok) {
+      this.rejectAction(
+        room,
+        userId,
+        'Нельзя настроить контрольную игру с этими параметрами.',
+        'ILLEGAL_CONTROL',
+      );
     }
-    return configured;
+    return result.ok;
   }
 
   private handleChatSend(room: Room, userId: string, action: JsonRecord): void {
+    const client = room.clients.get(userId);
+    if (client?.isBot) {
+      this.rejectAction(room, userId, 'Боты не могут писать в чат.', 'BOTS_NO_CHAT');
+      return;
+    }
+    if (!this.isChatEnabled(room)) {
+      this.rejectAction(
+        room,
+        userId,
+        'Чат доступен только когда за столом 2 или более живых игрока.',
+        'CHAT_DISABLED',
+      );
+      return;
+    }
     if (typeof action.text !== 'string') {
-      this.rejectAction(room, userId, 'Текст сообщения обязателен.');
+      this.rejectAction(room, userId, 'Текст сообщения обязателен.', 'CHAT_EMPTY');
       return;
     }
 
     const text = this.sanitizeChatText(action.text);
     if (text.length === 0) {
-      this.rejectAction(room, userId, 'Сообщение не может быть пустым.');
+      this.rejectAction(room, userId, 'Сообщение не может быть пустым.', 'CHAT_EMPTY');
       return;
     }
     if (text.length > MAX_CHAT_MESSAGE_LENGTH) {
@@ -527,13 +816,14 @@ export class RoomManager {
         room,
         userId,
         `Сообщение не должно превышать ${MAX_CHAT_MESSAGE_LENGTH} символов.`,
+        'CHAT_TOO_LONG',
       );
       return;
     }
 
     const player = room.engine.players.find((roomPlayer) => roomPlayer.id === userId);
     if (!player) {
-      this.rejectAction(room, userId, 'Отправлять сообщения могут только игроки.');
+      this.rejectAction(room, userId, 'Отправлять сообщения могут только игроки.', 'NOT_PLAYER');
       return;
     }
 
@@ -624,7 +914,12 @@ export class RoomManager {
     return typeof value === 'object' && value !== null;
   }
 
-  private rejectAction(room: Room, userId: string, message: string): void {
+  private rejectAction(
+    room: Room,
+    userId: string,
+    message: string,
+    code = 'REJECTED',
+  ): void {
     const client = room.clients.get(userId);
     if (!client) {
       return;
@@ -632,6 +927,8 @@ export class RoomManager {
     this.sendEvent(client.socket, {
       type: 'ACTION_REJECTED',
       message,
+      code,
+      stateVersion: room.stateVersion,
     });
   }
 
@@ -646,8 +943,8 @@ export class RoomManager {
     }
   }
 
-  private sendEvent(socket: RoomSocket, event: ServerEvent): boolean {
-    if (socket.readyState !== OPEN_SOCKET_STATE) {
+  private sendEvent(socket: RoomSocket | undefined, event: ServerEvent): boolean {
+    if (!socket || socket.readyState !== OPEN_SOCKET_STATE) {
       return false;
     }
     try {
@@ -663,13 +960,27 @@ export class RoomManager {
     const isViewerTurn = engine.players[engine.currentPlayerIndex]?.id === viewerId;
     const allowedBids =
       isViewerTurn && engine.state === GameState.BIDDING
-        ? engine.getAvailableBids(engine.currentPlayerIndex)
+        ? engine.getLegalBids(viewerId)
         : null;
-    const validCardIndices = engine.getValidCardIndices(viewerId);
+    const legalPlays =
+      isViewerTurn && engine.state === GameState.PLAYING_TRICKS
+        ? engine.getLegalPlays(viewerId)
+        : [];
+    const validCardIndices = legalPlays.map((play) => play.cardIndex);
+    const chatEnabled = this.isChatEnabled(room);
 
     return {
+      stateVersion: room.stateVersion,
+      turnDeadlineAt: room.turnDeadlineAt,
+      timeoutCount: room.timeoutCount,
+      chatEnabled,
+      humanCount: this.countHumans(room),
       allowedBids,
       validCardIndices,
+      legalPlays: legalPlays.map((play) => ({
+        cardIndex: play.cardIndex,
+        jokerActions: play.jokerActions,
+      })),
       state: engine.state,
       viewerId,
       hostId: room.ownerId,
@@ -679,8 +990,13 @@ export class RoomManager {
       dealerIndex: engine.dealerIndex,
       currentPlayerIndex: engine.currentPlayerIndex,
       trumpSuit: engine.trumpSuit,
+      // trumpCard only suit/rank for public; already known when shown
+      trumpCard: engine.trumpCard
+        ? this.serializeCard(engine.trumpCard)
+        : null,
       tableCards: engine.tableCards.map((playedCard) => ({
-        ...playedCard,
+        playerId: playedCard.playerId,
+        jokerAction: playedCard.jokerAction,
         card: this.serializeCard(playedCard.card),
       })),
       currentTrickLeadSuit: engine.currentTrickLeadSuit,
@@ -698,36 +1014,47 @@ export class RoomManager {
       playedRoundTypes: Array.from(engine.playedRoundTypes),
       controlGamesPlayed: engine.controlGamesPlayed,
       controlGameChooserId: engine.controlGameChooserId,
+      ranking: engine.ranking,
       players: engine.players.map((player) => {
+        const client = room.clients.get(player.id);
+        const base = {
+          id: player.id,
+          name: player.name,
+          score: player.score,
+          currentBid: player.currentBid,
+          tricksTaken: player.tricksTaken,
+          connected: client?.connected ?? false,
+          isBot: client?.isBot ?? false,
+        };
         if (player.id === viewerId) {
           const hideSelf = engine.isDarkRound && engine.state === GameState.BIDDING;
           const cards = hideSelf
             ? player.cards.map(() => null)
-            : player.cards.map((card) => this.serializeCard(card));
-          return {
-            ...player,
-            cards,
-            connected: room.clients.get(player.id)?.connected ?? false,
-          };
+            : player.cards.map((card) => this.serializeCard(card, true));
+          return { ...base, cards };
         }
+        // Fog of war: never send rank/suit of others
         return {
-          ...player,
+          ...base,
           cards: player.cards.map(() => null),
-          connected: room.clients.get(player.id)?.connected ?? false,
         };
       }),
     };
   }
 
-  private serializeCard(card: Card): {
+  private serializeCard(
+    card: Card,
+    forOwner = false,
+  ): {
     suit: Suit;
     rank: Card['rank'];
-    isJoker: boolean;
+    isJoker?: boolean;
   } {
     return {
       suit: card.suit,
       rank: card.rank,
-      isJoker: card.isJoker,
+      // isJoker highlight only for owner (ТЗ)
+      ...(forOwner ? { isJoker: card.isJoker } : {}),
     };
   }
 }

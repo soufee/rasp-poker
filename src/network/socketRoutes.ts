@@ -1,5 +1,6 @@
-import { randomUUID } from 'node:crypto';
 import { FastifyInstance } from 'fastify';
+import { isLocal } from '../config/env';
+import { getLocalDevUser } from '../db/seedLocal';
 import { roomManager } from './RoomManager';
 
 interface RoomSocketRoute {
@@ -8,8 +9,6 @@ interface RoomSocketRoute {
   };
   Querystring: {
     token?: string;
-    userId?: string;
-    userName?: string;
   };
 }
 
@@ -19,6 +18,7 @@ interface TokenPayload {
   displayName?: unknown;
   name?: unknown;
   email?: unknown;
+  tokenVersion?: unknown;
 }
 
 interface SocketIdentity {
@@ -69,34 +69,58 @@ function getTokenIdentity(
   }
 }
 
-function getSocketIdentity(
+/**
+ * Resolve identity for WS join.
+ * - Production: JWT required (userId only from token — no query spoof)
+ * - Local: JWT preferred; else auto local superuser `dev`
+ */
+async function resolveIdentity(
   fastify: FastifyInstance,
   query: RoomSocketRoute['Querystring'],
-): SocketIdentity {
+): Promise<SocketIdentity | null> {
   const tokenIdentity = getTokenIdentity(fastify, query.token);
   if (tokenIdentity) {
     return tokenIdentity;
   }
 
-  const userId = getNonEmptyString(query.userId) ?? `guest-${randomUUID()}`;
-  const userName = getNonEmptyString(query.userName) ?? `Гость ${userId.slice(0, 6)}`;
-  return { userId, userName };
+  if (isLocal) {
+    const dev = await getLocalDevUser();
+    if (dev) {
+      return { userId: dev.id, userName: dev.displayName };
+    }
+  }
+
+  return null;
 }
 
 export async function socketRoutes(fastify: FastifyInstance): Promise<void> {
-  fastify.get<RoomSocketRoute>('/ws/room/:roomId', { websocket: true }, (socket, request) => {
-    const identity = getSocketIdentity(fastify, request.query);
+  fastify.get<RoomSocketRoute>('/ws/room/:roomId', { websocket: true }, async (socket, request) => {
+    const identity = await resolveIdentity(fastify, request.query);
+    if (!identity) {
+      socket.send(
+        JSON.stringify({
+          type: 'ERROR',
+          message: 'Unauthorized: valid JWT token required (?token=...)',
+          code: 'WS_UNAUTHORIZED',
+        }),
+      );
+      socket.close();
+      return;
+    }
+
     const joined = roomManager.joinRoom(
       request.params.roomId,
       identity.userId,
       identity.userName,
       socket,
+      { isBot: false },
     );
     if (!joined) {
       socket.send(
         JSON.stringify({
           type: 'ERROR',
           message: 'Не удалось войти: комната не найдена, заполнена или игра уже началась.',
+          code: 'JOIN_FAILED',
         }),
       );
       socket.close();

@@ -22,6 +22,7 @@
     "db:migrate": "prisma migrate deploy",
     "db:migrate:dev": "prisma migrate dev",
     "db:studio": "prisma studio",
+    "smoke:bots": "tsx scripts/smoke-bots.ts",
     "postinstall": "prisma generate"
   },
   "repository": {
